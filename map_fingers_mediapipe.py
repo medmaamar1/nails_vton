@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 try:
     import mediapipe as mp
+    from mediapipe.python.solutions import hands as mp_hands_module
 except ImportError:
     print("Please install mediapipe first: pip install mediapipe")
     import sys
@@ -34,8 +35,7 @@ def map_fingers_with_mediapipe(train_dir, output_path):
     ]
 
     # MediaPipe Setup
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(
+    hands = mp_hands_module.Hands(
         static_image_mode=True,
         max_num_hands=2,
         min_detection_confidence=0.3  # Generous confidence to catch tricky hands
