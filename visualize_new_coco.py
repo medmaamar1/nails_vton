@@ -4,7 +4,7 @@ import json
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-sys.path.insert(0, r"C:\Users\OrdiOne\Desktop\douccana marketplace - Copy\nails_vton")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dataset import assign_finger_ids, FINGER_UNUSED, FINGER_THUMB, FINGER_INDEX, FINGER_MIDDLE, FINGER_RING, FINGER_PINKY
 from test_finger_mapping import visualize_mapping, LBL, COLOR_MAP
 
@@ -26,7 +26,8 @@ def visualize_new_dataset_mapping(coco_dir, num_samples=5):
     # Take first num_samples images
     image_ids = list(id_to_anns.keys())[:num_samples]
 
-    os.makedirs(r"C:\Users\OrdiOne\Desktop\douccana marketplace - Copy\nails_vton\debug_plots", exist_ok=True)
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_plots")
+    os.makedirs(out_dir, exist_ok=True)
     
     for img_id in image_ids:
         anns = id_to_anns[img_id]
@@ -80,12 +81,12 @@ def visualize_mapping_with_image(img_path, bboxes, labels, title, filename):
     plt.title(title)
     plt.tight_layout()
     
-    save_path = os.path.join(r"C:\Users\OrdiOne\Desktop\douccana marketplace - Copy\nails_vton\debug_plots", filename)
+    save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_plots", filename)
     plt.savefig(save_path)
     plt.close()
     print(f"  -> Visual confirmation saved to: {save_path}")
 
 if __name__ == "__main__":
-    test_dir = r"C:\Users\OrdiOne\Desktop\douccana marketplace - Copy\nails_segmentation_coco\test"
+    test_dir = "/kaggle/input/datasets/maamarmohamed12/nails-vton/train"
     print("Testing mapping on new dataset...")
     visualize_new_dataset_mapping(test_dir, num_samples=10)
