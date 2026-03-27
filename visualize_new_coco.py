@@ -32,6 +32,7 @@ def visualize_new_dataset_mapping(coco_dir, num_samples=5):
     for img_id in image_ids:
         anns = id_to_anns[img_id]
         bboxes = [ann['bbox'] for ann in anns]
+        segmentations = [ann.get('segmentation', []) for ann in anns]
         labels = assign_finger_ids(bboxes)
         
         filename = id_to_file[img_id]
@@ -41,12 +42,13 @@ def visualize_new_dataset_mapping(coco_dir, num_samples=5):
         visualize_mapping_with_image(
             os.path.join(coco_dir, filename),
             bboxes,
+            segmentations,
             labels,
             f"Image ID: {img_id}",
             f"mapped_{filename}"
         )
 
-def visualize_mapping_with_image(img_path, bboxes, labels, title, filename):
+def visualize_mapping_with_image(img_path, bboxes, segmentations, labels, title, filename):
     fig, ax = plt.subplots(figsize=(8, 8))
     
     try:
@@ -63,16 +65,29 @@ def visualize_mapping_with_image(img_path, bboxes, labels, title, filename):
             ax.set_xlim(min(all_x) - padx, max(all_x) + padx)
             ax.set_ylim(max(all_y) + pady, min(all_y) - pady)
 
-    for i, (bbox, label) in enumerate(zip(bboxes, labels)):
+    for i, (bbox, seg, label) in enumerate(zip(bboxes, segmentations, labels)):
         x, y, w, h = bbox
         color = COLOR_MAP.get(label, "black")
         name = LBL.get(label, f"UNK({label})")
         
-        rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor=color, facecolor='none')
-        ax.add_patch(rect)
+        # Draw the precise curved polygon mask
+        if seg and len(seg) > 0 and len(seg[0]) >= 6:
+            poly = seg[0]
+            xs = poly[0::2]
+            ys = poly[1::2]
+            polygon = patches.Polygon(list(zip(xs, ys)), linewidth=2, edgecolor=color, facecolor=color, alpha=0.4)
+            ax.add_patch(polygon)
+        else:
+            # Fallback to bbox if no segmentation exists
+            rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor=color, facecolor=color, alpha=0.4)
+            ax.add_patch(rect)
+        
+        # Draw bounding box outline for reference
+        rect_outline = patches.Rectangle((x, y), w, h, linewidth=1, linestyle='--', edgecolor=color, facecolor='none')
+        ax.add_patch(rect_outline)
         
         plt.text(x, y-5, f"{i}: {name}", color="white", weight="bold", 
-                 bbox=dict(facecolor=color, alpha=0.8, edgecolor="none", pad=2))
+                 bbox=dict(facecolor=color, alpha=0.9, edgecolor="none", pad=2))
         
         cx = x + w/2
         cy = y + h/2
