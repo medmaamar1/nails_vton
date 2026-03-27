@@ -13,8 +13,11 @@ Run:
     python test_finger_mapping.py -v
 """
 
+import os
 import sys
 import unittest
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
 sys.path.insert(0, ".")
 from dataset import (
@@ -22,6 +25,59 @@ from dataset import (
     FINGER_UNUSED, FINGER_THUMB, FINGER_INDEX,
     FINGER_MIDDLE, FINGER_RING, FINGER_PINKY,
 )
+
+# Colors for each finger type
+COLOR_MAP = {
+    FINGER_UNUSED: "gray",
+    FINGER_THUMB: "red",
+    FINGER_INDEX: "green",
+    FINGER_MIDDLE: "blue",
+    FINGER_RING: "orange",
+    FINGER_PINKY: "purple",
+}
+
+def visualize_mapping(bboxes, labels, title, filename):
+    """
+    Draw bboxes on a placeholder canvas and save as image.
+    """
+    fig, ax = plt.subplots(figsize=(8, 8))
+    
+    # Hand-colored background
+    ax.set_facecolor("#f5d5c5") 
+    
+    # Coordinates range
+    all_x = [b[0] for b in bboxes] + [b[0] + b[2] for b in bboxes]
+    all_y = [b[1] for b in bboxes] + [b[1] + b[3] for b in bboxes]
+    padx, pady = 50, 50
+    ax.set_xlim(min(all_x) - padx, max(all_x) + padx)
+    ax.set_ylim(max(all_y) + pady, min(all_y) - pady) # Inverted for image space
+    
+    for i, (bbox, label) in enumerate(zip(bboxes, labels)):
+        x, y, w, h = bbox
+        color = COLOR_MAP.get(label, "black")
+        name = LBL.get(label, f"UNK({label})")
+        
+        # Bbox
+        rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor=color, facecolor='none')
+        ax.add_patch(rect)
+        
+        # Label
+        plt.text(x, y-5, f"{i}: {name}", color="white", weight="bold", 
+                 bbox=dict(facecolor=color, alpha=0.8, edgecolor="none", pad=2))
+        
+        # Centroid
+        cx = x + w/2
+        cy = y + h/2
+        plt.plot(cx, cy, 'o', color=color, markersize=5)
+
+    plt.title(title)
+    plt.tight_layout()
+    
+    os.makedirs("debug_plots", exist_ok=True)
+    save_path = os.path.join("debug_plots", filename)
+    plt.savefig(save_path)
+    plt.close()
+    print(f"  -> Visual confirmation saved to: {save_path}")
 
 LBL = {0:"UNUSED", 1:"THUMB", 2:"INDEX", 3:"MIDDLE", 4:"RING", 5:"PINKY"}
 
@@ -380,23 +436,27 @@ class TestCrossImageConsistency(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("=" * 65)
-    print("Nail VTON — Real Data Finger Mapping Tests")
-    print("Bboxes taken verbatim from _annotations.coco.json")
-    print("=" * 65)
-    print()
+    print("-" * 65)
+    print("Nail VTON - Real Data Finger Mapping Visualizer")
+    print("-" * 65)
 
+    # Visual Confirmation
+    print("Generating visual confirmation plots in 'debug_plots/'...")
+    test_cases = [
+        ("Image ID 0 (Left Hand)", "image_id_0.png", TestImageId0.BBOXES),
+        ("Image ID 1 (Different Orientation)", "image_id_1.png", TestImageId1.BBOXES),
+        ("Image ID 7 (Stress Test - 9 Nails)", "image_id_7.png", TestImageId7.BBOXES),
+        ("Image ID 8 (Tiny Nails)", "image_id_8.png", TestImageId8.BBOXES),
+    ]
+    
+    for title, filename, bboxes in test_cases:
+        labels = assign_finger_ids(bboxes)
+        visualize_mapping(bboxes, labels, title, filename)
+
+    print("\nStarting unit tests...")
     loader = unittest.TestLoader()
     suite  = loader.loadTestsFromModule(__import__("__main__"))
-    runner = unittest.TextTestRunner(verbosity=2)
+    runner = unittest.TextTestRunner(verbosity=1)
     result = runner.run(suite)
 
-    print()
-    print("=" * 65)
-    if result.wasSuccessful():
-        print(f"ALL {result.testsRun} TESTS PASSED ✓")
-    else:
-        print(f"{len(result.failures)} FAILURES  {len(result.errors)} ERRORS "
-              f"out of {result.testsRun} tests")
-    print("=" * 65)
     sys.exit(0 if result.wasSuccessful() else 1)
