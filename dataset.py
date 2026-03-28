@@ -31,7 +31,7 @@ import torchvision.transforms.functional as TF
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-MAX_INSTANCES = 10
+MAX_INSTANCES = 11      # Channel 0: Background, Channels 1-10: Up to 10 Nails
 IMAGE_SIZE    = 512
 MEAN          = [0.485, 0.456, 0.406]
 STD           = [0.229, 0.224, 0.225]
@@ -116,19 +116,19 @@ def compute_direction_field(mask_np, bbox):
     """
     H, W = mask_np.shape
     x, y, w, h = bbox
+    
+    # Ensure height is at least 1 pixel to prevent zero-norm vectors
+    h = max(h, 1.0)
 
     vx = 0.0                        # tip and base share the same x-centre
-    vy = -(h)                       # tip is above base → negative y direction
-
-    norm = math.sqrt(vx * vx + vy * vy)
-    if norm < 1e-6:
-        return np.zeros((2, H, W), dtype=np.float32)
-
-    ux, uy = vx / norm, vy / norm   # unit vector (always (0, -1) for vertical nails)
+    vy = -1.0                       # Direction is always upwards (-y) in this simple model
 
     fg = (mask_np > 127).astype(np.float32)
-    dx = fg * ux
-    dy = fg * uy
+    if fg.sum() == 0:
+        return np.zeros((2, H, W), dtype=np.float32)
+
+    dx = fg * vx
+    dy = fg * vy
     return np.stack([dx, dy], axis=0)              # (2, H, W)
 
 
@@ -266,11 +266,16 @@ class NailDataset(Dataset):
             binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
         binary_t = torch.from_numpy(binary_np).clone().unsqueeze(0)   # (1, H, W)
 
-        # ── Instance masks — one-hot (10, H, W) ──────────────────────────────
+        # ── Instance masks — one-hot (11, H, W) ──────────────────────────────
+        # Channel 0 is background. Channels 1-10 are for nails.
         inst_np = np.zeros((MAX_INSTANCES, S, S), dtype=np.float32)
         for i, m in enumerate(masks_resized):
-            inst_np[i] = np.array(m, dtype=np.float32) / 255.0
-        inst_t = torch.from_numpy(inst_np).clone()                     # (10, H, W)
+            if i + 1 < MAX_INSTANCES:
+                inst_np[i+1] = np.array(m, dtype=np.float32) / 255.0
+        
+        # Background channel (0) is 1.0 where no nail is present
+        inst_np[0] = 1.0 - np.max(inst_np[1:], axis=0)
+        inst_t = torch.from_numpy(inst_np).clone()                     # (11, H, W)
 
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
@@ -290,10 +295,11 @@ class NailDataset(Dataset):
         for m in masks_resized:
             m.close()
 
-        # ── Finger id tensor (10,) — 0 for unused slots ───────────────────────
+        # ── Finger id tensor (11,) — 0 for background slot ────────────────────
         finger_t = torch.zeros(MAX_INSTANCES, dtype=torch.long)
         for i, lbl in enumerate(finger_labels):
-            finger_t[i] = lbl
+            if i + 1 < MAX_INSTANCES:
+                finger_t[i+1] = lbl
 
         return {
             "image"          : img_t,                          # (3,  H, W)

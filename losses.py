@@ -222,20 +222,22 @@ def compute_iou(pred_mask, target_mask, threshold=0.5, eps=1e-6):
 def compute_instance_iou(inst_logits, target_masks, eps=1e-6):
     """
     Mean IoU for the softmax instance head.
-    inst_logits  : (B, 10, H, W) raw logits
-    target_masks : (B, 10, H, W) one-hot float
-    Only counts channels that have at least one positive pixel in the target.
+    inst_logits  : (B, 11, H, W) raw logits
+    target_masks : (B, 11, H, W) one-hot float
+    Only counts channels 1-10 (nails) that have at least one positive pixel.
+    Ignores background (channel 0).
     """
     probs       = torch.softmax(inst_logits, dim=1)
     pred_binary = (probs > 0.5).float()
 
-    intersection = (pred_binary * target_masks).sum(dim=(-2, -1))  # (B, 10)
+    intersection = (pred_binary * target_masks).sum(dim=(-2, -1))  # (B, 11)
     union        = (pred_binary + target_masks).clamp(0, 1).sum(dim=(-2, -1))
 
-    # Only average over channels with actual nail annotations
-    valid        = target_masks.sum(dim=(-2, -1)) > 0               # (B, 10)
-    iou          = (intersection + eps) / (union + eps)
-    iou_valid    = iou[valid]
+    # Only average over channels 1-10 (nails) with actual annotations
+    # Skip channel 0 (background)
+    valid_channels = target_masks[:, 1:].sum(dim=(-2, -1)) > 0      # (B, 10)
+    iou            = (intersection[:, 1:] + eps) / (union[:, 1:] + eps)
+    iou_valid      = iou[valid_channels]
 
     return iou_valid.mean().item() if iou_valid.numel() > 0 else 0.0
 
