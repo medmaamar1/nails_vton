@@ -174,7 +174,9 @@ def main():
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
     # Encoder (pretrained) gets 10× lower LR than decoder (random init)
-    encoder_params = list(model.encoder.parameters())
+    base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    
+    encoder_params = list(base_model.encoder.parameters())
     encoder_ids    = {id(p) for p in encoder_params}
     decoder_params = [p for p in model.parameters() if id(p) not in encoder_ids]
 
@@ -201,7 +203,20 @@ def main():
 
     if args.resume and Path(args.resume).exists():
         ckpt = torch.load(args.resume, map_location=device)
-        model.load_state_dict(ckpt["model"])
+        
+        # Guard against mismatch between multi/single GPU checkpoints
+        state_dict = ckpt["model"]
+        is_multi_gpu_ckpt = any(k.startswith('module.') for k in state_dict.keys())
+        is_currently_multi = isinstance(model, torch.nn.DataParallel)
+        
+        if is_multi_gpu_ckpt and not is_currently_multi:
+            # Strip 'module.' prefix
+            state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        elif not is_multi_gpu_ckpt and is_currently_multi:
+            # Add 'module.' prefix
+            state_dict = {f'module.{k}': v for k, v in state_dict.items()}
+            
+        model.load_state_dict(state_dict)
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch      = ckpt["epoch"] + 1
         best_val_bin_iou = ckpt.get("best_val_bin_iou", 0.0)
