@@ -187,8 +187,11 @@ class NailDataset(Dataset):
             masks_pil.append(polygon_to_mask(seg[0], orig_h, orig_w))
             bboxes_orig.append(ann["bbox"])
 
-        # ── Finger identity (from original-scale bboxes) ──────────────────────
-        finger_labels = assign_finger_ids(bboxes_orig)
+        # ── Finger identity ────────────────────────────────────────────────────
+        # We do NOT use the geometric heuristic here — finger identity is resolved
+        # at inference time via MediaPipe in the frontend. The AI only needs to
+        # learn to segment each nail as a distinct instance.
+        finger_labels = [FINGER_UNUSED] * len(bboxes_orig)
 
         # ── Resize to image_size ──────────────────────────────────────────────
         sx = self.image_size / orig_w
