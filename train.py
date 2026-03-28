@@ -32,10 +32,10 @@ def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
     p.add_argument("--data_root",   default="/kaggle/input/datasets/maamarmohamed12/nails-vton/train")
     p.add_argument("--epochs",      type=int,   default=100)
-    p.add_argument("--batch_size",  type=int,   default=16)
+    p.add_argument("--batch_size",  type=int,   default=64)
     p.add_argument("--patience",    type=int,   default=10, 
                    help="Early stopping patience (epochs)")
-    p.add_argument("--lr",          type=float, default=2e-3)
+    p.add_argument("--lr",          type=float, default=3e-3)
     p.add_argument("--image_size",  type=int,   default=512)
     p.add_argument("--num_workers", type=int,   default=0)
     p.add_argument("--ckpt_dir",    default="checkpoints")
@@ -108,7 +108,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         if (i + 1) % 50 == 0:
             mem = psutil.virtual_memory().used / (1024**3)
             print(f"  step {i+1}/{n_batches} | "
-                  f"loss={current_loss:.4f}  "
+                  f"loss={current_loss:.4f}  dir_loss={loss_dict['loss_direction']:.4f}  "
                   f"bin_iou={bin_iou:.4f}  inst_iou={inst_iou:.4f} | "
                   f"RAM={mem:.1f}GB")
             
