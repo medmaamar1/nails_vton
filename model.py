@@ -144,9 +144,11 @@ class NailVTONModel(nn.Module):
         self.head_direction = SegHead(FUSE, 2,             image_size)
 
     def forward(self, x):
-        x_half    = F.interpolate(x, scale_factor=0.5, mode="bilinear",
-                                  align_corners=False)
-        feat_high = self.encoder.forward_high(x)
+        # Using internal autocast to prevent DataParallel memory leaks
+        with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled()):
+            x_half    = F.interpolate(x, scale_factor=0.5, mode="bilinear",
+                                      align_corners=False)
+            feat_high = self.encoder.forward_high(x)
         feat_low  = self.encoder.forward_low(x_half)
 
         f0 = self.fusion0(feat_low,  feat_high)

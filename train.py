@@ -13,6 +13,7 @@ import sys
 import argparse
 import time
 import gc
+import psutil
 from pathlib import Path
 
 import torch
@@ -103,12 +104,15 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         total_inst_iou += inst_iou
 
         if (i + 1) % 50 == 0:
+            mem = psutil.virtual_memory().used / (1024**3)
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={current_loss:.4f}  "
-                  f"bin={loss_dict['loss_binary']:.4f}  "
-                  f"inst={loss_dict['loss_instance']:.4f}  "
-                  f"dir={loss_dict['loss_direction']:.4f}  "
-                  f"bin_iou={bin_iou:.4f}  inst_iou={inst_iou:.4f}")
+                  f"bin_iou={bin_iou:.4f}  inst_iou={inst_iou:.4f} | "
+                  f"RAM={mem:.1f}GB")
+            
+            # Frequent small flush to prevent pile-up
+            torch.cuda.empty_cache()
+            gc.collect()
 
         # Aggressively delete everything from the GPU/RAM
         del image, targets, preds, loss, current_loss
