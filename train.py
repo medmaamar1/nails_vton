@@ -157,7 +157,13 @@ def main():
 
     # ── Model ──────────────────────────────────────────────────────────────────
     model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
-    model.count_parameters()
+    
+    # Enable DataParallel for Kaggle 2x GPUs
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = torch.nn.DataParallel(model)
+        
+    model.module.count_parameters() if isinstance(model, torch.nn.DataParallel) else model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = NailVTONLoss(
@@ -247,7 +253,7 @@ def main():
 
         ckpt = {
             "epoch"           : epoch,
-            "model"           : model.state_dict(),
+            "model"           : model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict(),
             "optimizer"       : optimizer.state_dict(),
             "best_val_bin_iou": best_val_bin_iou,
             "history"         : history,
