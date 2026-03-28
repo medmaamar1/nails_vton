@@ -7,8 +7,12 @@ Dual-path cascade (Duke et al.) with MobileNetV3-Small backbone:
                Better than V2: SE blocks recalibrate channels per-layer,
                h-swish gives smoother gradients — both help nail/skin separation.
 
+<<<<<<< HEAD
   Encoder paths (asymmetric depth, shared weights):
     High-res path : features[:4]  on full-res input  -> 1/8,   24ch
+=======
+  Encoder paths (asymmetric depth, shared w    High-res path : features[:4]  on full-res input  -> 1/8,   24ch
+>>>>>>> b0b5f5291cba732f6295b054f17ca0cefb12ec93
     Low-res path  : features[:9]  on half-res input  -> 1/16,  48ch
     (deep low-res path compensates for reduced spatial resolution)
 
@@ -180,7 +184,10 @@ if __name__ == "__main__":
 
     print(f"binary    : {binary.shape}")
     print(f"instances : {instances.shape}")
+    
     probs = torch.softmax(instances, dim=1)
     print(f"softmax sum at [0,:,16,16] : {probs[0,:,16,16].sum().item():.6f}  (must be 1.0)")
     print(f"direction : {direction.shape}")
+    print(f"direction norm at [0,:,16,16]: {direction[0,:,16,16].norm().item():.6f}  (must be ~1.0)")
+
     print("\nModel sanity check PASSED ✓")
