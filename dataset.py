@@ -274,8 +274,12 @@ class NailDataset(Dataset):
 # ── DataLoader factory ─────────────────────────────────────────────────────────
 
 def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
-    train_root = Path(dataset_root) / "train"
-    valid_root = Path(dataset_root) / "valid"
+    root = Path(dataset_root)
+    
+    # If standard 'train' subfolder exists, use it; otherwise use the root itself.
+    # This prevents path doubling like /kaggle/.../train/train/_annotations...
+    train_root = root / "train" if (root / "train").exists() else root
+    valid_root = root / "valid"
 
     train_ds = NailDataset(train_root, augment=True)
 
