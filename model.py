@@ -87,9 +87,12 @@ class SegHead(nn.Module):
 
     def forward(self, x):
         x = self.ds(x)
+        # Optimization: Apply channel reduction BEFORE upsampling.
+        # This reduces activation memory for the heads by ~30x (128 ch -> 1-10 ch).
+        x = self.conv(x)
         x = F.interpolate(x, size=(self.output_size, self.output_size),
                           mode="bilinear", align_corners=False)
-        return self.conv(x)
+        return x
 
 
 # -- MobileNetV3-Small encoder -------------------------------------------------
