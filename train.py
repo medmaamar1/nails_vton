@@ -70,12 +70,14 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
     n_batches      = len(loader)
 
     for i, batch in enumerate(loader):
+        # Only extract what we need — drop finger_ids/n_instances immediately
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
             "instance_masks" : batch["instance_masks"].to(device,  non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
+        del batch  # Release finger_ids, n_instances, image_id CPU tensors immediately
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -131,12 +133,14 @@ def validate(model, loader, criterion, device, use_amp):
     n_batches      = len(loader)
 
     for batch in loader:
+        # Only extract what we need
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
             "instance_masks" : batch["instance_masks"].to(device,  non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
+        del batch  # Release unused CPU tensors immediately
 
         with autocast("cuda", enabled=use_amp):
             preds = model(image)
