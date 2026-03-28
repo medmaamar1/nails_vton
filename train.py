@@ -38,6 +38,8 @@ def parse_args():
     p.add_argument("--ckpt_dir",    default="checkpoints")
     p.add_argument("--resume",      default=None)
     p.add_argument("--no_amp",      action="store_true")
+    p.add_argument("--patience",    type=int,   default=10,
+                   help="Early stopping patience (epochs)")
     p.add_argument("--warmup_epochs", type=int, default=5,
                    help="Linear LR warmup before cosine decay kicks in")
     p.add_argument("--w_binary",    type=float, default=1.0)
@@ -196,10 +198,10 @@ def main():
 
     scaler = GradScaler("cuda", enabled=use_amp)
 
-    # ── Resume ─────────────────────────────────────────────────────────────────
-    start_epoch      = 0
-    best_val_bin_iou = 0.0
-    history          = []
+    start_epoch       = 0
+    best_val_bin_iou  = 0.0
+    epochs_no_improve = 0
+    history           = []
 
     if args.resume and Path(args.resume).exists():
         ckpt = torch.load(args.resume, map_location=device)
@@ -218,9 +220,10 @@ def main():
             
         model.load_state_dict(state_dict)
         optimizer.load_state_dict(ckpt["optimizer"])
-        start_epoch      = ckpt["epoch"] + 1
-        best_val_bin_iou = ckpt.get("best_val_bin_iou", 0.0)
-        history          = ckpt.get("history", [])
+        start_epoch       = ckpt["epoch"] + 1
+        best_val_bin_iou  = ckpt.get("best_val_bin_iou", 0.0)
+        epochs_no_improve = ckpt.get("epochs_no_improve", 0)
+        history           = ckpt.get("history", [])
         print(f"Resumed from epoch {start_epoch}  "
               f"(best binary IoU={best_val_bin_iou:.4f})")
 
@@ -270,21 +273,31 @@ def main():
             "epoch"           : epoch,
             "model"           : model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict(),
             "optimizer"       : optimizer.state_dict(),
-            "best_val_bin_iou": best_val_bin_iou,
-            "history"         : history,
-            "args"            : vars(args),
+            "best_val_bin_iou" : best_val_bin_iou,
+            "epochs_no_improve": epochs_no_improve,
+            "history"          : history,
+            "args"             : vars(args),
         }
 
         torch.save(ckpt, ckpt_dir / "latest.pt")
 
         if val_bin_iou > best_val_bin_iou:
             best_val_bin_iou = val_bin_iou
+            epochs_no_improve = 0
             ckpt["best_val_bin_iou"] = best_val_bin_iou
             torch.save(ckpt, ckpt_dir / "best.pt")
             print(f"  ✓ New best val binary IoU: {best_val_bin_iou:.4f} — saved best.pt")
+        else:
+            epochs_no_improve += 1
+            print(f"  Patience: {epochs_no_improve}/{args.patience}")
 
         with open(ckpt_dir / "history.json", "w") as f:
             json.dump(history, f, indent=2)
+
+        if epochs_no_improve >= args.patience:
+            print(f"\nTarget validation metric hasn't improved for {args.patience} epochs.")
+            print("Stopping early to prevent overfitting.")
+            break
 
     print(f"\nTraining complete.")
     print(f"Best val binary IoU : {best_val_bin_iou:.4f}")

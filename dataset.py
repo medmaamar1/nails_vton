@@ -144,20 +144,60 @@ class NailDataset(Dataset):
         with open(ann_path, "r") as f:
             coco = json.load(f)
 
-        self.id_to_file = {img["id"]: img["file_name"] for img in coco["images"]}
+        # Pre-resolve image paths by scanning the directory (recursive).
+        # This workaround handles Roboflow long filenames that may be truncated 
+        # on certain filesystems (Kaggle/Linux) causing OSError: [Errno 36].
+        print(f"[NailDataset] Mapping files in {self.root}...")
+        all_files = list(self.root.rglob("*.jpg")) + list(self.root.rglob("*.png"))
+        
+        # Maps for quick lookup: hash -> Path, and name -> Path
+        hash_to_path = {}
+        name_to_path = {}
+        for p in all_files:
+            name_to_path[p.name] = p
+            if ".rf." in p.name:
+                h = p.name.split(".rf.")[-1].split(".")[0]
+                hash_to_path[h] = p
 
         self.id_to_anns = {}
         for ann in coco["annotations"]:
-            iid = ann["image_id"]
-            self.id_to_anns.setdefault(iid, [])
-            self.id_to_anns[iid].append(ann)
+            aid = ann["image_id"]
+            self.id_to_anns.setdefault(aid, [])
+            self.id_to_anns[aid].append(ann)
 
-        self.image_ids = [
-            iid for iid in self.id_to_file
-            if iid in self.id_to_anns and len(self.id_to_anns[iid]) > 0
-        ]
+        self.image_ids  = []
+        self.id_to_path = {}
 
-        print(f"[NailDataset] {len(self.image_ids)} images  "
+        for img in coco["images"]:
+            iid = img["id"]
+            # Skip if no annotations
+            if iid not in self.id_to_anns or not self.id_to_anns[iid]:
+                continue
+                
+            fname = img["file_name"]
+            rf_hash = fname.split(".rf.")[-1].split(".")[0] if ".rf." in fname else None
+            
+            # Attempt to find the file using: hash -> direct name -> fallback images subfolder
+            target_path = None
+            if rf_hash and rf_hash in hash_to_path:
+                target_path = hash_to_path[rf_hash]
+            elif fname in name_to_path:
+                target_path = name_to_path[fname]
+            else:
+                # Final check (handles cases where rglob might have missed it or path is weird)
+                try:
+                    p1 = self.root / fname
+                    p2 = self.root / "images" / fname
+                    if p1.exists(): target_path = p1
+                    elif p2.exists(): target_path = p2
+                except OSError: # Still too long? Skip it.
+                    pass
+
+            if target_path:
+                self.id_to_path[iid] = target_path
+                self.image_ids.append(iid)
+
+        print(f"[NailDataset] Loaded {len(self.image_ids)} valid images (out of {len(coco['images'])} in JSON). "
               f"(root={root}, augment={augment})")
 
     def __len__(self):
@@ -165,14 +205,10 @@ class NailDataset(Dataset):
 
     def __getitem__(self, idx):
         image_id  = self.image_ids[idx]
-        file_name = self.id_to_file[image_id]
+        img_path  = self.id_to_path[image_id]
         anns      = self.id_to_anns[image_id]
 
         # ── Load image ────────────────────────────────────────────────────────
-        # Images may live directly in root or inside root/images
-        img_path = self.root / file_name
-        if not img_path.exists():
-            img_path = self.root / "images" / file_name
         image          = Image.open(img_path).convert("RGB")
         orig_w, orig_h = image.size
 
