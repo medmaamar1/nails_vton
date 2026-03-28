@@ -242,10 +242,13 @@ class NailDataset(Dataset):
         masks_resized  = []
         bboxes_resized = []
         for m, (x, y, w, h) in zip(masks_pil, bboxes_orig):
-            masks_resized.append(
-                m.resize((self.image_size, self.image_size), Image.NEAREST)
-            )
+            m_resized = m.resize((self.image_size, self.image_size), Image.NEAREST)
+            masks_resized.append(m_resized)
             bboxes_resized.append([x * sx, y * sy, w * sx, h * sy])
+            # Explicitly close and delete original PIL image to save RAM
+            m.close()
+
+        del masks_pil
 
         # ── Augmentation ──────────────────────────────────────────────────────
         if self.augment:

@@ -10,9 +10,9 @@ Dataset root should contain:
 """
 
 import sys
-import json
 import argparse
 import time
+import gc
 from pathlib import Path
 
 import torch
@@ -93,19 +93,25 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
+        # Detach metrics and move to CPU immediately to avoid graph retention
+        current_loss = loss_dict["loss_total"]
         bin_iou  = compute_iou(preds[0].detach(), targets["binary_mask"])
         inst_iou = compute_instance_iou(preds[1].detach(), targets["instance_masks"])
-        total_loss     += loss_dict["loss_total"]
+        
+        total_loss     += current_loss
         total_bin_iou  += bin_iou
         total_inst_iou += inst_iou
 
         if (i + 1) % 50 == 0:
             print(f"  step {i+1}/{n_batches} | "
-                  f"loss={loss_dict['loss_total']:.4f}  "
+                  f"loss={current_loss:.4f}  "
                   f"bin={loss_dict['loss_binary']:.4f}  "
                   f"inst={loss_dict['loss_instance']:.4f}  "
                   f"dir={loss_dict['loss_direction']:.4f}  "
                   f"bin_iou={bin_iou:.4f}  inst_iou={inst_iou:.4f}")
+
+        # Aggressively delete everything from the GPU/RAM
+        del image, targets, preds, loss, current_loss
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
@@ -133,8 +139,10 @@ def validate(model, loader, criterion, device, use_amp):
             _, loss_dict = criterion(preds, targets)
 
         total_loss     += loss_dict["loss_total"]
-        total_bin_iou  += compute_iou(preds[0], targets["binary_mask"])
-        total_inst_iou += compute_instance_iou(preds[1], targets["instance_masks"])
+        total_bin_iou  += compute_iou(preds[0].detach(), targets["binary_mask"])
+        total_inst_iou += compute_instance_iou(preds[1].detach(), targets["instance_masks"])
+
+        del image, targets, preds
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
@@ -299,8 +307,9 @@ def main():
             print("Stopping early to prevent overfitting.")
             break
 
-        # Release VRAM cache
+        # Release VRAM cache and force CPU garbage collection
         torch.cuda.empty_cache()
+        gc.collect()
 
     print(f"\nTraining complete.")
     print(f"Best val binary IoU : {best_val_bin_iou:.4f}")
