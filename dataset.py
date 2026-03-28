@@ -197,8 +197,13 @@ class NailDataset(Dataset):
                 self.id_to_path[iid] = target_path
                 self.image_ids.append(iid)
 
-        print(f"[NailDataset] Loaded {len(self.image_ids)} valid images (out of {len(coco['images'])} in JSON). "
-              f"(root={root}, augment={augment})")
+        print(f"[NailDataset] Loaded {len(self.image_ids)} valid images (root={root}, augment={augment})")
+
+        # Free memory (JSON and file list can be large)
+        if 'coco' in locals(): del coco
+        if 'all_files' in locals(): del all_files
+        if 'hash_to_path' in locals(): del hash_to_path
+        if 'name_to_path' in locals(): del name_to_path
 
     def __len__(self):
         return len(self.image_ids)
