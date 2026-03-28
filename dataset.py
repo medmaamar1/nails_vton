@@ -214,8 +214,8 @@ class NailDataset(Dataset):
         anns      = self.id_to_anns[image_id]
 
         # ── Load image ────────────────────────────────────────────────────────
-        image          = Image.open(img_path).convert("RGB")
-        orig_w, orig_h = image.size
+        image_orig     = Image.open(img_path).convert("RGB")
+        orig_w, orig_h = image_orig.size
 
         # ── Build per-nail masks at original resolution ───────────────────────
         masks_pil   = []
@@ -237,7 +237,8 @@ class NailDataset(Dataset):
         # ── Resize to image_size ──────────────────────────────────────────────
         sx = self.image_size / orig_w
         sy = self.image_size / orig_h
-        image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
+        image = image_orig.resize((self.image_size, self.image_size), Image.BILINEAR)
+        image_orig.close()
 
         masks_resized  = []
         bboxes_resized = []
@@ -263,13 +264,13 @@ class NailDataset(Dataset):
         binary_np = np.zeros((S, S), dtype=np.float32)
         for m in masks_resized:
             binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
-        binary_t = torch.from_numpy(binary_np).unsqueeze(0)   # (1, H, W)
+        binary_t = torch.from_numpy(binary_np).clone().unsqueeze(0)   # (1, H, W)
 
         # ── Instance masks — one-hot (10, H, W) ──────────────────────────────
         inst_np = np.zeros((MAX_INSTANCES, S, S), dtype=np.float32)
         for i, m in enumerate(masks_resized):
             inst_np[i] = np.array(m, dtype=np.float32) / 255.0
-        inst_t = torch.from_numpy(inst_np)                     # (10, H, W)
+        inst_t = torch.from_numpy(inst_np).clone()                     # (10, H, W)
 
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
@@ -282,7 +283,12 @@ class NailDataset(Dataset):
         valid = norm > 1e-6
         dir_np[0, valid] /= norm[valid]
         dir_np[1, valid] /= norm[valid]
-        dir_t = torch.from_numpy(dir_np)                       # (2, H, W)
+        dir_t = torch.from_numpy(dir_np).clone()                       # (2, H, W)
+
+        # Cleanup explicitly to prevent multiprocess IPC leaks
+        image.close()
+        for m in masks_resized:
+            m.close()
 
         # ── Finger id tensor (10,) — 0 for unused slots ───────────────────────
         finger_t = torch.zeros(MAX_INSTANCES, dtype=torch.long)
@@ -302,16 +308,24 @@ class NailDataset(Dataset):
     # ── Augmentation ──────────────────────────────────────────────────────────
 
     def _augment(self, image, masks):
+        def _apply_img_aug(img_in, fn, *args):
+            img_out = fn(img_in, *args)
+            if hasattr(img_in, "close") and img_in is not img_out:
+                img_in.close()
+            return img_out
+
         if random.random() > 0.5:
-            image = TF.hflip(image)
-            masks = [TF.hflip(m) for m in masks]
+            image = _apply_img_aug(image, TF.hflip)
+            masks = [_apply_img_aug(m, TF.hflip) for m in masks]
         if random.random() > 0.5:
-            image = TF.vflip(image)
-            masks = [TF.vflip(m) for m in masks]
-        image = TF.adjust_brightness(image, 1 + random.uniform(-0.2,  0.2))
-        image = TF.adjust_contrast(image,   1 + random.uniform(-0.2,  0.2))
-        image = TF.adjust_saturation(image, 1 + random.uniform(-0.3,  0.3))
-        image = TF.adjust_hue(image,            random.uniform(-0.05, 0.05))
+            image = _apply_img_aug(image, TF.vflip)
+            masks = [_apply_img_aug(m, TF.vflip) for m in masks]
+            
+        image = _apply_img_aug(image, TF.adjust_brightness, 1 + random.uniform(-0.2,  0.2))
+        image = _apply_img_aug(image, TF.adjust_contrast,   1 + random.uniform(-0.2,  0.2))
+        image = _apply_img_aug(image, TF.adjust_saturation, 1 + random.uniform(-0.3,  0.3))
+        image = _apply_img_aug(image, TF.adjust_hue,            random.uniform(-0.05, 0.05))
+        
         return image, masks
 
 

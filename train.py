@@ -175,13 +175,8 @@ def main():
 
     # ── Model ──────────────────────────────────────────────────────────────────
     model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
-    
-    # Enable DataParallel for Kaggle 2x GPUs
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        model = torch.nn.DataParallel(model)
-        
-    model.module.count_parameters() if isinstance(model, torch.nn.DataParallel) else model.count_parameters()
+    print(f"Using device: {device}")
+    model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = NailVTONLoss(
