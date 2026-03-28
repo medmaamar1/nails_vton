@@ -140,9 +140,7 @@ class NailDataset(Dataset):
         self.augment    = augment
         self.image_size = image_size
 
-        # Prefer the MediaPipe-mapped JSON if it exists alongside the original
-        mapped_path = self.root / "_annotations_mapped_train.coco.json"
-        ann_path    = mapped_path if mapped_path.exists() else self.root / "_annotations.coco.json"
+        ann_path = self.root / "_annotations.coco.json"
         with open(ann_path, "r") as f:
             coco = json.load(f)
 
@@ -189,14 +187,8 @@ class NailDataset(Dataset):
             masks_pil.append(polygon_to_mask(seg[0], orig_h, orig_w))
             bboxes_orig.append(ann["bbox"])
 
-        # ── Finger identity — read from category_id if available ───────────────
-        # Fall back to geometric heuristic only if all category_ids are 0/None
-        raw_cat_ids = [ann.get("category_id", 0) for ann in anns[:MAX_INSTANCES]
-                       if ann.get("segmentation") and len(ann["segmentation"][0]) >= 6]
-        if any(c and c != 0 for c in raw_cat_ids):
-            finger_labels = [c if c else FINGER_INDEX for c in raw_cat_ids]
-        else:
-            finger_labels = assign_finger_ids(bboxes_orig)
+        # ── Finger identity (from original-scale bboxes) ──────────────────────
+        finger_labels = assign_finger_ids(bboxes_orig)
 
         # ── Resize to image_size ──────────────────────────────────────────────
         sx = self.image_size / orig_w
