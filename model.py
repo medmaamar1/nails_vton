@@ -8,33 +8,18 @@ Dual-path cascade (Duke et al.) with MobileNetV3-Small backbone:
                h-swish gives smoother gradients — both help nail/skin separation.
 
   Encoder paths (asymmetric depth, shared weights):
-    High-res path : features[:4]  on full-res input  → 1/8,   24ch
-    Low-res path  : features[:9]  on half-res input  → 1/16,  48ch
+    High-res path : features[:4]  on full-res input  -> 1/8,   24ch
+    Low-res path  : features[:9]  on half-res input  -> 1/16,  48ch
     (deep low-res path compensates for reduced spatial resolution)
 
-  Fusion : 2× CFF (Cascade Feature Fusion) blocks
-    Fusion0 : CFF(low=48ch,  high=24ch) → 128ch  at 1/8
-    Fusion1 : CFF(fused=128ch, high=24ch) → 128ch  at 1/8
+  Fusion : 2x CFF (Cascade Feature Fusion) blocks
+    Fusion0 : CFF(low=48ch,  high=24ch) -> 128ch  at 1/8
+    Fusion1 : CFF(fused=128ch, high=24ch) -> 128ch  at 1/8
 
   Heads (all upsample to IMAGE_SIZE):
-    head_binary    → (B,  1, H, W)  raw logits       — sigmoid at inference
-    head_instances → (B, 10, H, W)  raw logits       — softmax at inference
-    head_direction → (B,  2, H, W)  normalised unit vectors
-
-MobileNetV3-Small feature map layout (input N×3×512×512):
-  features[0]   stem conv     stride 2  → 256×256   16ch
-  features[1]   bneck stride 2          → 128×128   16ch
-  features[2]   bneck stride 2          →  64×64    24ch
-  features[3]   bneck stride 1          →  64×64    24ch  ← high-res split
-  features[4]   bneck stride 2          →  32×32    40ch
-  features[5]   bneck stride 1          →  32×32    40ch
-  features[6]   bneck stride 1          →  32×32    40ch
-  features[7]   bneck stride 1          →  32×32    48ch
-  features[8]   bneck stride 1          →  32×32    48ch  ← low-res split
-  features[9]   bneck stride 2          →  16×16    96ch
-  features[10]  bneck stride 1          →  16×16    96ch
-  features[11]  bneck stride 1          →  16×16    96ch
-  features[12]  conv 1×1                →  16×16   576ch
+    head_binary    -> (B,  1, H, W)  raw logits       - sigmoid at inference
+    head_instances -> (B, 10, H, W)  raw logits       - softmax at inference
+    head_direction -> (B,  2, H, W)  normalised unit vectors
 """
 
 import torch
@@ -45,7 +30,7 @@ import torchvision.models as models
 MAX_INSTANCES = 10
 
 
-# ── Building blocks ────────────────────────────────────────────────────────────
+# -- Building blocks -----------------------------------------------------------
 
 class DepthwiseSeparable(nn.Module):
     """Lightweight depthwise-separable conv for decoder heads."""
@@ -63,9 +48,9 @@ class DepthwiseSeparable(nn.Module):
 class CFF(nn.Module):
     """
     Cascade Feature Fusion (ICNet-style).
-      low_feat  → bilinear upsample to high_feat size → dilated conv (d=2)
-      high_feat → 1×1 projection
-      output    → element-wise sum → ReLU6
+      low_feat  -> bilinear upsample to high_feat size -> dilated conv (d=2)
+      high_feat -> 1x1 projection
+      output    -> element-wise sum -> ReLU6
     """
     def __init__(self, low_ch, high_ch, out_ch):
         super().__init__()
@@ -88,7 +73,7 @@ class CFF(nn.Module):
 class SegHead(nn.Module):
     """
     Decoder head:
-      depthwise-separable conv → bilinear upsample to output_size → 1×1 conv
+      depthwise-separable conv -> bilinear upsample to output_size -> 1x1 conv
     """
     def __init__(self, in_ch, out_ch, output_size):
         super().__init__()
@@ -103,18 +88,14 @@ class SegHead(nn.Module):
         return self.conv(x)
 
 
-# ── MobileNetV3-Small encoder ──────────────────────────────────────────────────
+# -- MobileNetV3-Small encoder -------------------------------------------------
 
 class MobileNetV3Encoder(nn.Module):
     """
     Two asymmetric prefix sub-networks sharing weights:
 
-      high_path = features[:4]  shallow, run on full-res  → 1/8,  24ch
-      low_path  = features[:9]  deep,    run on half-res  → 1/16, 48ch
-
-    Both are slices of the same nn.Sequential — weight sharing is automatic.
-    SE blocks in each bottleneck recalibrate channel importance, which helps
-    distinguish nail pixels from visually similar skin pixels.
+      high_path = features[:4]  shallow, run on full-res  -> 1/8,  24ch
+      low_path  = features[:9]  deep,    run on half-res  -> 1/16, 48ch
     """
     def __init__(self, pretrained=True):
         super().__init__()
@@ -122,38 +103,21 @@ class MobileNetV3Encoder(nn.Module):
             weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1
             if pretrained else None
         )
-        f = backbone.features          # 13 blocks total
+        f = backbone.features
 
-        self.high_path = nn.Sequential(*f[:4])   # → 1/8,  24ch
-        self.low_path  = nn.Sequential(*f[:9])   # → 1/16, 48ch
+        self.high_path = nn.Sequential(*f[:4])   # -> 1/8,  24ch
+        self.low_path  = nn.Sequential(*f[:9])   # -> 1/16, 48ch
 
     def forward_high(self, x):
-        """Shallow prefix on full-resolution input → (B, 24, H/8, W/8)."""
         return self.high_path(x)
 
     def forward_low(self, x_half):
-        """Deep prefix on half-resolution input → (B, 48, H/16, W/16)."""
         return self.low_path(x_half)
 
 
-# ── Main model ─────────────────────────────────────────────────────────────────
+# -- Main model ----------------------------------------------------------------
 
 class NailVTONModel(nn.Module):
-    """
-    Forward pass (input B×3×512×512):
-
-      x_half    = downsample(x, 0.5)               → B×3×256×256
-      feat_high = encoder.forward_high(x)          → B×24×64×64
-      feat_low  = encoder.forward_low(x_half)      → B×48×16×16
-
-      f0 = Fusion0(low=feat_low,  high=feat_high)  → B×128×64×64
-      f1 = Fusion1(low=f0,        high=feat_high)  → B×128×64×64
-
-      binary    = head_binary(f1)    → B×1×512×512   logits
-      instances = head_instances(f1) → B×10×512×512  logits
-      direction = head_direction(f1) → B×2×512×512   unit vectors
-    """
-
     def __init__(self, image_size=512, max_instances=MAX_INSTANCES, pretrained=True):
         super().__init__()
         self.image_size    = image_size
@@ -165,8 +129,8 @@ class NailVTONModel(nn.Module):
         LOW_CH  = 48
         FUSE    = 128
 
-        self.fusion0 = CFF(LOW_CH,  HIGH_CH, FUSE)   # 48  + 24  → 128
-        self.fusion1 = CFF(FUSE,    HIGH_CH, FUSE)   # 128 + 24  → 128
+        self.fusion0 = CFF(LOW_CH,  HIGH_CH, FUSE)
+        self.fusion1 = CFF(FUSE,    HIGH_CH, FUSE)
 
         self.head_binary    = SegHead(FUSE, 1,             image_size)
         self.head_instances = SegHead(FUSE, max_instances, image_size)
@@ -175,11 +139,11 @@ class NailVTONModel(nn.Module):
     def forward(self, x):
         x_half    = F.interpolate(x, scale_factor=0.5, mode="bilinear",
                                   align_corners=False)
-        feat_high = self.encoder.forward_high(x)        # B×24×H/8×W/8
-        feat_low  = self.encoder.forward_low(x_half)    # B×48×H/16×W/16
+        feat_high = self.encoder.forward_high(x)
+        feat_low  = self.encoder.forward_low(x_half)
 
-        f0 = self.fusion0(feat_low,  feat_high)         # B×128×H/8×W/8
-        f1 = self.fusion1(f0,        feat_high)         # B×128×H/8×W/8
+        f0 = self.fusion0(feat_low,  feat_high)
+        f1 = self.fusion1(f0,        feat_high)
 
         binary    = self.head_binary(f1)
         instances = self.head_instances(f1)
@@ -190,12 +154,6 @@ class NailVTONModel(nn.Module):
 
     @torch.no_grad()
     def predict(self, x, binary_thresh=0.5):
-        """
-        Returns:
-            binary_mask    (B,  1, H, W)  bool
-            instance_probs (B, 10, H, W)  float  softmax probabilities
-            direction      (B,  2, H, W)  float  unit vectors
-        """
         self.eval()
         binary_logits, inst_logits, direction = self(x)
         return (
@@ -207,11 +165,11 @@ class NailVTONModel(nn.Module):
     def count_parameters(self):
         total     = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"Parameters — total: {total:,}  trainable: {trainable:,}")
+        print(f"Parameters -- total: {total:,}  trainable: {trainable:,}")
         return total, trainable
 
 
-# ── Sanity check ───────────────────────────────────────────────────────────────
+# -- Sanity check --------------------------------------------------------------
 
 if __name__ == "__main__":
     model = NailVTONModel(image_size=512, pretrained=False)
@@ -223,9 +181,4 @@ if __name__ == "__main__":
     print(f"binary    : {binary.shape}")
     print(f"instances : {instances.shape}")
     print(f"direction : {direction.shape}")
-
-    probs = torch.softmax(instances, dim=1)
-    print(f"softmax sum at [0,:,16,16] : {probs[0,:,16,16].sum().item():.6f}  (must be 1.0)")
-    print(f"direction norm at [0,:,16,16]: {direction[0,:,16,16].norm().item():.6f}  (must be ~1.0)")
-
     print("\nModel sanity check PASSED ✓")
