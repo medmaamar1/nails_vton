@@ -83,6 +83,12 @@ def run_sanity_check(data_root):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", default="c:/Users/OrdiOne/Desktop/douccana marketplace - Copy/douccana/public/nails_dataset")
+    parser.add_argument("--data_root", help="Path to your COCO dataset (e.g. /kaggle/input/nails-dataset)")
     args = parser.parse_args()
-    run_sanity_check(args.data_root)
+    
+    if not args.data_root or not Path(args.data_root).exists():
+        print(f"\n🛑 ERROR: Data root '{args.data_root}' not found.")
+        print("Please provide the correct path using --data_root")
+        print("Example: python sanity_check.py --data_root /kaggle/input/datasets/maamarmohamed12/nails-vton/train")
+    else:
+        run_sanity_check(args.data_root)
