@@ -86,9 +86,25 @@ if __name__ == "__main__":
     parser.add_argument("--data_root", help="Path to your COCO dataset (e.g. /kaggle/input/nails-dataset)")
     args = parser.parse_args()
     
-    if not args.data_root or not Path(args.data_root).exists():
-        print(f"\n🛑 ERROR: Data root '{args.data_root}' not found.")
+    root = args.data_root
+    
+    # Auto-detection for Kaggle common paths
+    if not root:
+        common_paths = [
+            "/kaggle/input/datasets/maamarmohamed12/nails-vton/train",
+            "/kaggle/input/nails-vton/train",
+            "/kaggle/input/nails-vton",
+            "c:/Users/OrdiOne/Desktop/douccana marketplace - Copy/nails_segmentation_coco"
+        ]
+        for p in common_paths:
+            if Path(p).exists():
+                root = p
+                print(f"📂 Auto-detected data_root: {root}")
+                break
+
+    if not root or not Path(root).exists():
+        print(f"\n🛑 ERROR: Data root '{root}' not found.")
         print("Please provide the correct path using --data_root")
         print("Example: python sanity_check.py --data_root /kaggle/input/datasets/maamarmohamed12/nails-vton/train")
     else:
-        run_sanity_check(args.data_root)
+        run_sanity_check(root)
