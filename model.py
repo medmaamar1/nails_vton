@@ -180,5 +180,7 @@ if __name__ == "__main__":
 
     print(f"binary    : {binary.shape}")
     print(f"instances : {instances.shape}")
+    probs = torch.softmax(instances, dim=1)
+    print(f"softmax sum at [0,:,16,16] : {probs[0,:,16,16].sum().item():.6f}  (must be 1.0)")
     print(f"direction : {direction.shape}")
     print("\nModel sanity check PASSED ✓")
