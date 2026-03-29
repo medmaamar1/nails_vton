@@ -135,3 +135,55 @@ class NailVTONModel(nn.Module):
         direction = direction / direction.norm(dim=1, keepdim=True).clamp(min=1e-6)
 
         return binary, instances, direction
+
+    @torch.no_grad()
+    def predict(self, x, binary_thresh=0.5):
+        self.eval()
+        binary_logits, inst_logits, direction = self(x)
+        return (
+            torch.sigmoid(binary_logits) > binary_thresh,
+            torch.softmax(inst_logits, dim=1),
+            direction,
+        )
+
+    def count_parameters(self):
+        total     = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Parameters -- total: {total:,}  trainable: {trainable:,}")
+        return total, trainable
+
+    @torch.no_grad()
+    def predict(self, x, binary_thresh=0.5):
+        self.eval()
+        binary_logits, inst_logits, direction = self(x)
+        return (
+            torch.sigmoid(binary_logits) > binary_thresh,
+            torch.softmax(inst_logits, dim=1),
+            direction,
+        )
+
+    def count_parameters(self):
+        total     = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Parameters -- total: {total:,}  trainable: {trainable:,}")
+        return total, trainable
+
+
+# -- Sanity check --------------------------------------------------------------
+
+if __name__ == "__main__":
+    model = NailVTONModel(image_size=512, pretrained=False)
+    model.count_parameters()
+
+    dummy = torch.randn(1, 3, 64, 64)
+    binary, instances, direction = model(dummy)
+
+    print(f"binary    : {binary.shape}")
+    print(f"instances : {instances.shape}")
+    
+    probs = torch.softmax(instances, dim=1)
+    print(f"softmax sum at [0,:,16,16] : {probs[0,:,16,16].sum().item():.6f}  (must be 1.0)")
+    print(f"direction : {direction.shape}")
+    print(f"direction norm at [0,:,16,16]: {direction[0,:,16,16].norm().item():.6f}  (must be ~1.0)")
+
+    print("\nModel sanity check PASSED ✓")

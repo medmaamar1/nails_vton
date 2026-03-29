@@ -103,11 +103,15 @@ class InstanceSegLoss(nn.Module):
 
 class NailVTONLoss(nn.Module):
     """
-    L = L_fgbg + L_class + L_field
-    Strictly unweighted.
+    L = w_binary*L_fgbg + w_class*L_class + w_field*L_field
+    Paper defaults to unweighted (1.0).
     """
-    def __init__(self, lmp_ratio=0.1):
+    def __init__(self, lmp_ratio=0.1, w_binary=1.0, w_instance=1.0, w_direction=1.0):
         super().__init__()
+        self.w_binary    = w_binary
+        self.w_instance  = w_instance
+        self.w_direction = w_direction
+        
         self.binary_loss    = BinarySegLoss(keep_ratio=lmp_ratio)
         self.instance_loss  = InstanceSegLoss()
         self.direction_loss = DirectionLoss()
@@ -119,6 +123,7 @@ class NailVTONLoss(nn.Module):
         l_inst = self.instance_loss(inst_logits, targets["instance_masks"], targets["binary_mask"])
         l_dir  = self.direction_loss(direction,  targets["direction_field"])
 
+        # Strictly following the paper's math: L = L_fgbg + L_class + L_field
         total = l_bin + l_inst + l_dir
 
         return total, {

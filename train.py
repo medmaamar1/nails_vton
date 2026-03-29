@@ -44,9 +44,6 @@ def parse_args():
     p.add_argument("--no_amp",      action="store_true")
     p.add_argument("--warmup_epochs", type=int, default=5,
                    help="Linear LR warmup before cosine decay kicks in")
-    p.add_argument("--w_binary",    type=float, default=1.0)
-    p.add_argument("--w_instance",  type=float, default=1.0)
-    p.add_argument("--w_direction", type=float, default=0.5)
     return p.parse_args()
 
 
@@ -180,11 +177,7 @@ def main():
     model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
-    criterion = NailVTONLoss(
-        w_binary    = args.w_binary,
-        w_instance  = args.w_instance,
-        w_direction = args.w_direction,
-    )
+    criterion = NailVTONLoss()
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
     # Encoder (pretrained) gets 10× lower LR than decoder (random init)
