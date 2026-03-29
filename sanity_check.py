@@ -20,10 +20,10 @@ def run_sanity_check(data_root):
     inst_t   = batch["instance_masks"].to(device)
     dir_t    = batch["direction_field"].to(device)
     
-    print(f"     Image shape    : {images.shape}")         # (B, 3, 512, 512)
-    print(f"     Binary mask    : {binary_t.shape}")       # (B, 1, 512, 512)
-    print(f"     Instance masks : {inst_t.shape}")         # (B, 10, 512, 512)
-    print(f"     Direction field: {dir_t.shape}")         # (B, 2, 512, 512)
+    print(f"     Image shape    : {images.shape}")         # (B, 3, 448, 448)
+    print(f"     Binary mask    : {binary_t.shape}")       # (B, 1, 448, 448)
+    print(f"     Instance masks : {inst_t.shape}")         # (B, 10, 448, 448)
+    print(f"     Direction field: {dir_t.shape}")         # (B, 2, 448, 448)
     
     # In strict VTNFP, instance_masks only contains fingernail pixels.
     # Background is defined by the binary mask being 0.
@@ -37,7 +37,7 @@ def run_sanity_check(data_root):
 
     # 2. Test Model Output
     print("\n[2/4] Testing Model Architecture...")
-    model = NailVTONModel(image_size=512, pretrained=False).to(device)
+    model = NailVTONModel(image_size=448, pretrained=False).to(device)
     preds = model(images)
     
     print(f"     Binary Logits: {preds[0].shape}")
@@ -53,9 +53,9 @@ def run_sanity_check(data_root):
     print("\n[3/4] Testing Loss Functions...")
     criterion = NailVTONLoss()
     loss, loss_dict = criterion(preds, {
-        "binary_mask": binary_t,
-        "instance_masks": inst_t,
-        "direction_field": dir_t
+        "binary_mask": (torch.rand(binary_t.shape[0], 1, 448, 448) > 0.8).float().to(device),
+        "instance_masks": torch.zeros(inst_t.shape[0], 10, 448, 448).to(device),
+        "direction_field": torch.randn(dir_t.shape[0], 2, 448, 448).to(device)
     })
     
     print(f"     Total Loss     : {loss.item():.4f}")

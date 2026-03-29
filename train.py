@@ -33,11 +33,11 @@ def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
     p.add_argument("--data_root",   default="/kaggle/input/datasets/almohamed132/nails-vton/train")
     p.add_argument("--epochs",      type=int,   default=100)
-    p.add_argument("--batch_size",  type=int,   default=64)
+    p.add_argument("--batch_size",  type=int,   default=32)
     p.add_argument("--patience",    type=int,   default=10, 
                    help="Early stopping patience (epochs)")
     p.add_argument("--lr",          type=float, default=3e-3)
-    p.add_argument("--image_size",  type=int,   default=512)
+    p.add_argument("--image_size",  type=int,   default=448)
     p.add_argument("--num_workers", type=int,   default=0)
     p.add_argument("--ckpt_dir",    default="checkpoints")
     p.add_argument("--resume",      default=None)
@@ -96,8 +96,11 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
         # Detach metrics and move to CPU immediately to avoid graph retention
         current_loss = loss_dict["loss_total"]
-        bin_iou  = compute_iou(preds[0].detach(), targets["binary_mask"])
-        inst_iou = compute_instance_iou(preds[1].detach(), targets["instance_masks"])
+        
+        # Pull final level for metrics
+        final_preds = preds[-1]
+        bin_iou  = compute_iou(final_preds[0].detach(), targets["binary_mask"])
+        inst_iou = compute_instance_iou(final_preds[1].detach(), targets["instance_masks"], targets["binary_mask"])
         
         total_loss     += current_loss
         total_bin_iou  += bin_iou
@@ -105,8 +108,10 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
         if (i + 1) % 50 == 0:
             mem = psutil.virtual_memory().used / (1024**3)
+            # Use final layer's direction loss for logging if available, otherwise total l2_dir
+            l_dir_log = loss_dict.get('l2_dir', 0.0)
             print(f"  step {i+1}/{n_batches} | "
-                  f"loss={current_loss:.4f}  dir_loss={loss_dict['loss_direction']:.4f}  "
+                  f"loss={current_loss:.4f}  "
                   f"bin_iou={bin_iou:.4f}  inst_iou={inst_iou:.4f} | "
                   f"RAM={mem:.1f}GB")
             
@@ -144,9 +149,10 @@ def validate(model, loader, criterion, device, use_amp):
             preds = model(image)
             _, loss_dict = criterion(preds, targets)
 
+        final_preds = preds[-1]
         total_loss     += loss_dict["loss_total"]
-        total_bin_iou  += compute_iou(preds[0].detach(), targets["binary_mask"])
-        total_inst_iou += compute_instance_iou(preds[1].detach(), targets["instance_masks"])
+        total_bin_iou  += compute_iou(final_preds[0].detach(), targets["binary_mask"])
+        total_inst_iou += compute_instance_iou(final_preds[1].detach(), targets["instance_masks"], targets["binary_mask"])
 
         del image, targets, preds
 

@@ -32,7 +32,7 @@ import torchvision.transforms.functional as TF
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 MAX_INSTANCES = 10      # Channels 0-9: Up to 10 Nails
-IMAGE_SIZE    = 512
+IMAGE_SIZE    = 448
 MEAN          = [0.485, 0.456, 0.406]
 STD           = [0.229, 0.224, 0.225]
 

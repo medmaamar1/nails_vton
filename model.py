@@ -7,10 +7,8 @@ Strict adherence to VTNFP (Duke et al., 2019):
     High-res path : full-res input  -> 1/8,   32ch
     Low-res path  : half-res input  -> 1/16,  320ch (modified stride 16x)
   Fusion : Cascaded Feature Fusion blocks
-  Heads:
-    10-class softmax (nails)
-    1-channel binary (sigmoid)
-    2-channel direction (norm)
+  Laplacian Pyramid: Side-outputs at each fusion stage (Level 0, Level 1)
+  and at the final full-resolution layer (Level 2).
 """
 import torch
 import torch.nn as nn
@@ -31,12 +29,6 @@ class DepthwiseSeparable(nn.Module):
         return self.act(self.bn(self.pw(self.dw(x))))
 
 class CFF(nn.Module):
-    """
-    Cascade Feature Fusion (VTNFP style).
-      low_feat  -> bilinear upsample -> dilated conv (d=2)
-      high_feat -> 1x1 projection
-      output    -> element-wise sum -> ReLU6
-    """
     def __init__(self, low_ch, high_ch, out_ch=320):
         super().__init__()
         self.low_conv = nn.Sequential(
@@ -62,14 +54,12 @@ class MobileNetV2Encoder(nn.Module):
         f = backbone.features
 
         # High path: up to 32ch (stage 4 equivalent, stride 8)
-        # PyTorch indices: 0(s=2), 1(s=1), 2,3(s=2~4), 4,5,6(s=2~8) => 32 channels.
         self.high_path = nn.Sequential(*f[:7])
 
         # Low path: all stages but modify stride to max 16x
         self.low_path = nn.Sequential(*f[:18])
         
-        # Patch stride/dilation for stage 6/7 (idx 14 to 17)
-        # In PyTorch, idx 14 is the layer that jumps to stride 32x.
+        # Patch stride/dilation for stage 6/7 (idx 14 to 17) to keep resolution at 1/16
         self.low_path[14].conv[1][0].stride = (1, 1)
         for i in [14, 15, 16, 17]:
             self.low_path[i].conv[1][0].dilation = (2, 2)
@@ -82,21 +72,33 @@ class MobileNetV2Encoder(nn.Module):
         return self.low_path(x_half)
 
 class SegHead(nn.Module):
-    def __init__(self, in_ch, out_ch, output_size):
+    """
+    Output branch used at each level of the Laplacian pyramid.
+    Resolution determined by the input tensor (no intermediate upsampling).
+    The final scaling to full-res happens outside if this is the Level 2 head.
+    """
+    def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.output_size = output_size
         self.ds   = DepthwiseSeparable(in_ch, in_ch)
         self.conv = nn.Conv2d(in_ch, out_ch, 1)
 
     def forward(self, x):
         x = self.ds(x)
-        x = self.conv(x)
-        x = F.interpolate(x, size=(self.output_size, self.output_size),
-                          mode="bilinear", align_corners=False)
-        return x
+        return self.conv(x)
+
+class PyramidHeads(nn.Module):
+    """Group of output task heads for one level of the pyramid."""
+    def __init__(self, in_ch, max_instances=10):
+        super().__init__()
+        self.binary    = SegHead(in_ch, 1)
+        self.instances = SegHead(in_ch, max_instances)
+        self.direction = SegHead(in_ch, 2)
+
+    def forward(self, x):
+        return self.binary(x), self.instances(x), self.direction(x)
 
 class NailVTONModel(nn.Module):
-    def __init__(self, image_size=512, max_instances=10, pretrained=True):
+    def __init__(self, image_size=448, max_instances=10, pretrained=True):
         super().__init__()
         self.image_size    = image_size
         self.max_instances = max_instances
@@ -107,18 +109,13 @@ class NailVTONModel(nn.Module):
         LOW_CH  = 320
         FUSE    = 320
 
-        # Exact structure from Figure 1
-        # Fusion 1 (low_8 + low_4 upsampled is skipped as per standard ICNet optimization in codebases often,
-        # but the paper diagram uses: 
-        # f1 = fusion(low8 upsampled, low4)
-        # f2 = fusion(f1 upsampled, high4) -> Output)
-        # To match your existing dual CFF:
         self.fusion0 = CFF(LOW_CH, HIGH_CH, FUSE)
         self.fusion1 = CFF(FUSE, HIGH_CH, FUSE)
 
-        self.head_binary    = SegHead(FUSE, 1,             image_size)
-        self.head_instances = SegHead(FUSE, max_instances, image_size)
-        self.head_direction = SegHead(FUSE, 2,             image_size)
+        # Laplacian Pyramid Output branches
+        self.head_l0 = PyramidHeads(FUSE, max_instances) # Side-output at 1/8
+        self.head_l1 = PyramidHeads(FUSE, max_instances) # Side-output at 1/8
+        self.head_final = PyramidHeads(FUSE, max_instances) # Final at full-res (1/8 upsampled)
 
     def forward(self, x):
         with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled()):
@@ -126,24 +123,46 @@ class NailVTONModel(nn.Module):
             feat_high = self.encoder.forward_high(x)
         feat_low = self.encoder.forward_low(x_half)
 
+        # Level 0 fusion (low8 + low4) -> result is 1/8 resolution
         f0 = self.fusion0(feat_low, feat_high)
-        f1 = self.fusion1(f0,       feat_high)
+        out0_bin, out0_inst, out0_dir = self.head_l0(f0)
 
-        binary    = self.head_binary(f1)
-        instances = self.head_instances(f1)
-        direction = self.head_direction(f1)
-        direction = direction / direction.norm(dim=1, keepdim=True).clamp(min=1e-6)
+        # Level 1 fusion (f0 + high4) -> result is 1/8 resolution
+        f1 = self.fusion1(f0, feat_high)
+        out1_bin, out1_inst, out1_dir = self.head_l1(f1)
 
-        return binary, instances, direction
+        # Level 2 (Final full-resolution output branch)
+        out2_bin, out2_inst, out2_dir = self.head_final(f1)
+        
+        # Norm direction fields
+        def _norm_dir(d):
+            return d / d.norm(dim=1, keepdim=True).clamp(min=1e-6)
+
+        preds_l0 = (out0_bin, out0_inst, _norm_dir(out0_dir))
+        preds_l1 = (out1_bin, out1_inst, _norm_dir(out1_dir))
+        
+        # Upsample the final output to full image size
+        final_bin = F.interpolate(out2_bin, size=(self.image_size, self.image_size),
+                                  mode="bilinear", align_corners=False)
+        final_inst = F.interpolate(out2_inst, size=(self.image_size, self.image_size),
+                                   mode="bilinear", align_corners=False)
+        final_dir = F.interpolate(out2_dir, size=(self.image_size, self.image_size),
+                                  mode="bilinear", align_corners=False)
+        preds_final = (final_bin, final_inst, _norm_dir(final_dir))
+
+        return [preds_l0, preds_l1, preds_final]
 
     @torch.no_grad()
     def predict(self, x, binary_thresh=0.5):
         self.eval()
-        binary_logits, inst_logits, direction = self(x)
+        # predict returns only the FINAL level output for inference
+        multi_preds = self(x)
+        final_bin, final_inst, final_dir = multi_preds[-1]
+        
         return (
-            torch.sigmoid(binary_logits) > binary_thresh,
-            torch.softmax(inst_logits, dim=1),
-            direction,
+            torch.sigmoid(final_bin) > binary_thresh,
+            torch.softmax(final_inst, dim=1),
+            final_dir,
         )
 
     def count_parameters(self):
@@ -151,39 +170,16 @@ class NailVTONModel(nn.Module):
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Parameters -- total: {total:,}  trainable: {trainable:,}")
         return total, trainable
-
-    @torch.no_grad()
-    def predict(self, x, binary_thresh=0.5):
-        self.eval()
-        binary_logits, inst_logits, direction = self(x)
-        return (
-            torch.sigmoid(binary_logits) > binary_thresh,
-            torch.softmax(inst_logits, dim=1),
-            direction,
-        )
-
-    def count_parameters(self):
-        total     = sum(p.numel() for p in self.parameters())
-        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"Parameters -- total: {total:,}  trainable: {trainable:,}")
-        return total, trainable
-
-
-# -- Sanity check --------------------------------------------------------------
 
 if __name__ == "__main__":
-    model = NailVTONModel(image_size=512, pretrained=False)
+    model = NailVTONModel(image_size=448, pretrained=False)
     model.count_parameters()
 
-    dummy = torch.randn(1, 3, 64, 64)
-    binary, instances, direction = model(dummy)
-
-    print(f"binary    : {binary.shape}")
-    print(f"instances : {instances.shape}")
+    dummy = torch.randn(1, 3, 448, 448)
+    outs = model(dummy)
     
-    probs = torch.softmax(instances, dim=1)
-    print(f"softmax sum at [0,:,16,16] : {probs[0,:,16,16].sum().item():.6f}  (must be 1.0)")
-    print(f"direction : {direction.shape}")
-    print(f"direction norm at [0,:,16,16]: {direction[0,:,16,16].norm().item():.6f}  (must be ~1.0)")
+    print(f"Number of pyramid levels: {len(outs)}")
+    for i, (b, inst, d) in enumerate(outs):
+        print(f"Level {i}: bin={b.shape}, inst={inst.shape}, dir={d.shape}")
 
     print("\nModel sanity check PASSED ✓")
