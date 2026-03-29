@@ -1,86 +1,47 @@
 """
 Nail VTON Loss Functions
 ------------------------
-  1. BinarySegLoss    : LMP (BCE max-pool) + Dice  for binary head
-  2. InstanceSegLoss  : cross-entropy + Dice        for softmax instance head
-  3. DirectionLoss    : cosine similarity           for direction field
-  4. LMPLoss          : Loss Max-Pooling (class imbalance — nails ~2-5% of pixels)
-  5. NailVTONLoss     : combined loss with configurable weights
-
-Key fix vs previous version:
-  Instance head now uses SOFTMAX (10-class mutual exclusion), not 10 independent
-  sigmoids. Each pixel belongs to exactly one nail — or background (channel 0
-  is reserved for background in the 10-class scheme, channels 1-9 for nails).
-
-  Actually: the paper uses 10 channels for UP TO 10 nails and treats it as a
-  10-class softmax where channel i = "this pixel belongs to nail i".
-  Background is implicitly handled by the binary head.
-  Loss = cross-entropy over the 10 channels.
+Strict adherence to VTNFP (Duke et al., 2019):
+  1. LMPLoss          : Loss Max-Pooling (p=1, keep_ratio=0.1)
+  2. BinarySegLoss    : LMP over BCE (NLL for 2 classes)
+  3. InstanceSegLoss  : NLL (Cross-entropy) calculated ONLY inside fingernail regions
+  4. DirectionLoss    : L2 distance for direction field
+  5. NailVTONLoss     : L_fgbg + L_class + L_field (unweighted sum)
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # ── Loss Max-Pooling ───────────────────────────────────────────────────────────
 
 class LMPLoss(nn.Module):
     """
-    Loss Max-Pooling from the paper.
-    Computes BCE per-pixel, keeps top keep_ratio% of losses before averaging.
-    Forces focus on hard/rare pixels (nail boundaries, small nails).
+    Loss Max-Pooling from the paper (Section 3.3).
+    "taking the mean over the top 10% of pixels as the minibatch loss."
     """
-    def __init__(self, keep_ratio=0.3):
+    def __init__(self, keep_ratio=0.1):
         super().__init__()
         self.keep_ratio = keep_ratio
 
     def forward(self, logits, targets):
-        """logits, targets: (B, C, H, W)"""
+        """logits, targets: (B, 1, H, W)"""
         loss_map  = F.binary_cross_entropy_with_logits(
             logits, targets, reduction="none"
-        )                                                   # (B, C, H, W)
+        )                                                   # (B, 1, H, W)
         B         = loss_map.shape[0]
-        loss_flat = loss_map.view(B, -1)                   # (B, C*H*W)
+        loss_flat = loss_map.view(B, -1)                   # (B, 1*H*W)
         k         = max(1, int(loss_flat.size(1) * self.keep_ratio))
         top_k, _  = loss_flat.topk(k, dim=1)
         return top_k.mean()
-
-
-# ── Dice Loss ─────────────────────────────────────────────────────────────────
-
-class DiceLoss(nn.Module):
-    """Soft Dice loss. Works for both binary (sigmoid) and multi-class (softmax)."""
-    def __init__(self, smooth=1.0, use_softmax=False):
-        super().__init__()
-        self.smooth       = smooth
-        self.use_softmax  = use_softmax
-
-    def forward(self, logits, targets):
-        """
-        logits  : (B, C, H, W) raw
-        targets : (B, C, H, W) float in [0,1]
-        """
-        if self.use_softmax:
-            probs = torch.softmax(logits, dim=1)
-        else:
-            probs = torch.sigmoid(logits)
-
-        probs_f   = probs.view(probs.size(0),   probs.size(1),   -1)
-        targets_f = targets.view(targets.size(0), targets.size(1), -1)
-
-        inter = (probs_f * targets_f).sum(dim=-1)
-        union = probs_f.sum(dim=-1) + targets_f.sum(dim=-1)
-        dice  = (2.0 * inter + self.smooth) / (union + self.smooth)
-        return 1.0 - dice.mean()
 
 
 # ── Direction Loss ────────────────────────────────────────────────────────────
 
 class DirectionLoss(nn.Module):
     """
-    Cosine similarity loss on nail pixels only.
-    Background pixels have target direction (0,0) and are masked out.
+    Strict L2 loss on normalised base to tip direction.
+    Equation 3 in paper: ||u_pred - u_target||_2^2 over valid pixels.
     """
     def forward(self, pred_dir, target_dir):
         """
@@ -93,104 +54,72 @@ class DirectionLoss(nn.Module):
         if not valid_mask.any():
             return torch.tensor(0.0, device=pred_dir.device, requires_grad=True)
 
-        cos_sim = (pred_dir * target_dir).sum(dim=1)           # (B,H,W)
-        return (1.0 - cos_sim[valid_mask]).mean()
+        # L2 Distance squared: ||pred - target||^2
+        diff = pred_dir - target_dir
+        l2_sq = (diff ** 2).sum(dim=1)                         # (B,H,W)
+        return l2_sq[valid_mask].mean()
 
 
 # ── Binary Segmentation Loss ──────────────────────────────────────────────────
 
 class BinarySegLoss(nn.Module):
-    def __init__(self, lmp_ratio=0.3, w_lmp=0.5, w_dice=0.5):
+    """Binary NLL (BCE) with LMP."""
+    def __init__(self, keep_ratio=0.1):
         super().__init__()
-        self.lmp    = LMPLoss(keep_ratio=lmp_ratio)
-        self.dice   = DiceLoss(use_softmax=False)
-        self.w_lmp  = w_lmp
-        self.w_dice = w_dice
+        self.lmp = LMPLoss(keep_ratio=keep_ratio)
 
     def forward(self, logits, targets):
         """logits, targets: (B, 1, H, W)"""
-        return self.w_lmp * self.lmp(logits, targets) + \
-               self.w_dice * self.dice(logits, targets)
+        return self.lmp(logits, targets)
 
 
 # ── Instance Segmentation Loss ────────────────────────────────────────────────
 
 class InstanceSegLoss(nn.Module):
     """
-    Softmax cross-entropy + Dice for the 10-channel instance head.
-
-    targets : (B, MAX_INST, H, W) — one-hot style float masks.
-              Channel i is 1 for pixels belonging to nail i, 0 elsewhere.
-              Unused channels (beyond actual nail count) stay all-zero.
-
-    Cross-entropy treats it as a multi-class problem per pixel.
-    Dice is computed per channel over softmax probabilities.
+    Strict 10-class NLL. The paper says: 
+    "since fingernail class predictions are only valid in the fingernail region,
+    those classes are balanced and do not require LMP."
     """
-    def __init__(self, w_ce=0.5, w_dice=0.5):
-        super().__init__()
-        self.dice   = DiceLoss(use_softmax=True)
-        self.w_ce   = w_ce
-        self.w_dice = w_dice
-
-    def forward(self, logits, targets):
+    def forward(self, logits, targets, valid_mask):
         """
-        logits  : (B, MAX_INST, H, W)
-        targets : (B, MAX_INST, H, W) one-hot float
+        logits     : (B, 10, H, W)
+        targets    : (B, 10, H, W) one-hot float
+        valid_mask : (B,  1, H, W) float from binary target
         """
-        # Cross-entropy expects class indices (B, H, W) — derive from one-hot
-        # argmax along channel dim gives the correct class index per pixel.
-        # Background pixels (all zeros) will get class 0 which is fine —
-        # the binary head handles foreground/background separation.
         target_idx = targets.argmax(dim=1)                    # (B, H, W) long
+        valid_bool = valid_mask.squeeze(1) > 0.5              # (B, H, W) bool
 
-        ce_loss   = F.cross_entropy(logits, target_idx)
-        dice_loss = self.dice(logits, targets)
+        if not valid_bool.any():
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
-        return self.w_ce * ce_loss + self.w_dice * dice_loss
+        logits_valid = logits.permute(0, 2, 3, 1)[valid_bool] # (N_valid, 10)
+        target_valid = target_idx[valid_bool]                 # (N_valid,)
+
+        return F.cross_entropy(logits_valid, target_valid)
 
 
 # ── Combined Loss ─────────────────────────────────────────────────────────────
 
 class NailVTONLoss(nn.Module):
     """
-    L = w_binary * L_binary + w_instance * L_instance + w_direction * L_direction
+    L = L_fgbg + L_class + L_field
+    Strictly unweighted.
     """
-    def __init__(
-        self,
-        w_binary    = 1.0,
-        w_instance  = 1.0,
-        w_direction = 0.5,
-        lmp_ratio   = 0.3,
-    ):
+    def __init__(self, lmp_ratio=0.1):
         super().__init__()
-        self.w_binary    = w_binary
-        self.w_instance  = w_instance
-        self.w_direction = w_direction
-
-        self.binary_loss    = BinarySegLoss(lmp_ratio=lmp_ratio)
+        self.binary_loss    = BinarySegLoss(keep_ratio=lmp_ratio)
         self.instance_loss  = InstanceSegLoss()
         self.direction_loss = DirectionLoss()
 
     def forward(self, predictions, targets):
-        """
-        predictions : (binary_logits, inst_logits, direction)
-                      shapes: (B,1,H,W), (B,10,H,W), (B,2,H,W)
-        targets     : dict with keys:
-                        "binary_mask"     (B,  1, H, W) float
-                        "instance_masks"  (B, 10, H, W) float one-hot
-                        "direction_field" (B,  2, H, W) float unit vectors
-        Returns:
-            total_loss scalar, loss_dict for logging
-        """
         binary_logits, inst_logits, direction = predictions
 
-        l_bin  = self.binary_loss(binary_logits,   targets["binary_mask"])
-        l_inst = self.instance_loss(inst_logits,   targets["instance_masks"])
-        l_dir  = self.direction_loss(direction,    targets["direction_field"])
+        l_bin  = self.binary_loss(binary_logits, targets["binary_mask"])
+        l_inst = self.instance_loss(inst_logits, targets["instance_masks"], targets["binary_mask"])
+        l_dir  = self.direction_loss(direction,  targets["direction_field"])
 
-        total = (self.w_binary    * l_bin  +
-                 self.w_instance  * l_inst +
-                 self.w_direction * l_dir)
+        total = l_bin + l_inst + l_dir
 
         return total, {
             "loss_total"    : total.item(),
@@ -203,11 +132,6 @@ class NailVTONLoss(nn.Module):
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
 def compute_iou(pred_mask, target_mask, threshold=0.5, eps=1e-6):
-    """
-    Binary IoU for the binary segmentation head.
-    pred_mask   : (B, 1, H, W) logits or probs
-    target_mask : (B, 1, H, W) binary float
-    """
     if pred_mask.max() > 1.0 or pred_mask.min() < 0.0:
         pred_binary = (torch.sigmoid(pred_mask) > threshold).float()
     else:
@@ -219,27 +143,30 @@ def compute_iou(pred_mask, target_mask, threshold=0.5, eps=1e-6):
     return iou.mean().item()
 
 
-def compute_instance_iou(inst_logits, target_masks, eps=1e-6):
+def compute_instance_iou(inst_logits, target_masks, binary_mask, eps=1e-6):
     """
-    Mean IoU for the softmax instance head.
-    inst_logits  : (B, 11, H, W) raw logits
-    target_masks : (B, 11, H, W) one-hot float
-    Only counts channels 1-10 (nails) that have at least one positive pixel.
-    Ignores background (channel 0).
+    Mean IoU over valid nail regions (channels 0-9).
     """
-    probs       = torch.softmax(inst_logits, dim=1)
-    pred_binary = (probs > 0.5).float()
+    valid_bool = binary_mask.squeeze(1) > 0.5                 # (B, H, W)
+    if not valid_bool.any():
+        return 0.0
 
-    intersection = (pred_binary * target_masks).sum(dim=(-2, -1))  # (B, 11)
-    union        = (pred_binary + target_masks).clamp(0, 1).sum(dim=(-2, -1))
+    preds = inst_logits.argmax(dim=1)                         # (B, H, W)
 
-    # Only average over channels 1-10 (nails) with actual annotations
-    # Skip channel 0 (background)
-    valid_channels = target_masks[:, 1:].sum(dim=(-2, -1)) > 0      # (B, 10)
-    iou            = (intersection[:, 1:] + eps) / (union[:, 1:] + eps)
-    iou_valid      = iou[valid_channels]
+    total_iou = 0.0
+    valid_classes = 0
 
-    return iou_valid.mean().item() if iou_valid.numel() > 0 else 0.0
+    for c in range(inst_logits.shape[1]):
+        pred_c   = (preds == c) & valid_bool
+        target_c = (target_masks[:, c, :, :] > 0.5) & valid_bool
+
+        if target_c.sum() > 0:
+            inter = (pred_c & target_c).sum().float()
+            union = (pred_c | target_c).sum().float()
+            total_iou += (inter + eps) / (union + eps)
+            valid_classes += 1
+
+    return (total_iou / valid_classes).item() if valid_classes > 0 else 0.0
 
 
 # ── Sanity check ──────────────────────────────────────────────────────────────
@@ -248,11 +175,10 @@ if __name__ == "__main__":
     B, H, W, MAX_I = 2, 512, 512, 10
 
     binary_logits = torch.randn(B,      1, H, W)
-    inst_logits   = torch.randn(B, MAX_I, H, W)
+    inst_logits   = torch.randn(B,  MAX_I, H, W)
     direction     = torch.randn(B,      2, H, W)
     direction     = direction / direction.norm(dim=1, keepdim=True).clamp(min=1e-6)
 
-    # One-hot instance targets: assign each pixel to exactly one nail
     inst_idx   = torch.randint(0, MAX_I, (B, H, W))
     inst_onehot = torch.zeros(B, MAX_I, H, W)
     inst_onehot.scatter_(1, inst_idx.unsqueeze(1), 1.0)
@@ -270,5 +196,5 @@ if __name__ == "__main__":
         print(f"  {k}: {v:.4f}")
 
     print(f"  binary IoU     : {compute_iou(binary_logits, targets['binary_mask']):.4f}")
-    print(f"  instance IoU   : {compute_instance_iou(inst_logits, targets['instance_masks']):.4f}")
+    print(f"  instance IoU   : {compute_instance_iou(inst_logits, targets['instance_masks'], targets['binary_mask']):.4f}")
     print("\nLoss sanity check PASSED ✓")

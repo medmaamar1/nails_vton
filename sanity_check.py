@@ -7,10 +7,10 @@ from losses  import NailVTONLoss, compute_iou, compute_instance_iou
 
 def run_sanity_check(data_root):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"--- Nail VTON Sanity Check ---")
+    print(f"--- Nail VTON Sanity Check (Strict VTNFP) ---")
     print(f"Device: {device}")
 
-    # 1. Test Data Loading (11 Channels)
+    # 1. Test Data Loading (10 Channels)
     print("\n[1/4] Testing Data Loader...")
     train_loader, _ = make_loaders(data_root, batch_size=4, num_workers=0)
     batch = next(iter(train_loader))
@@ -22,19 +22,18 @@ def run_sanity_check(data_root):
     
     print(f"     Image shape    : {images.shape}")         # (B, 3, 512, 512)
     print(f"     Binary mask    : {binary_t.shape}")       # (B, 1, 512, 512)
-    print(f"     Instance masks : {inst_t.shape}")         # (B, 11, 512, 512)
+    print(f"     Instance masks : {inst_t.shape}")         # (B, 10, 512, 512)
     print(f"     Direction field: {dir_t.shape}")         # (B, 2, 512, 512)
     
-    # Check if background is at Channel 0
-    bg_sum = inst_t[:, 0].sum().item()
-    nail_sum = inst_t[:, 1:].sum().item()
-    print(f"     Background Pixels: {bg_sum:.0f}")
-    print(f"     Nail Pixels      : {nail_sum:.0f}")
+    # In strict VTNFP, instance_masks only contains fingernail pixels.
+    # Background is defined by the binary mask being 0.
+    nail_sum = inst_t.sum().item()
+    print(f"     Total Nail Pixels: {nail_sum:.0f}")
     
-    if bg_sum == 0:
-        print("     ❌ ERROR: Background channel is empty!")
+    if nail_sum == 0:
+        print("     ❌ ERROR: Instance masks are empty!")
     else:
-        print("     ✅ Background (Ch 0) vs Nails (Ch 1-10) separation verified.")
+        print("     ✅ Instance masks (10 channels) verified.")
 
     # 2. Test Model Output
     print("\n[2/4] Testing Model Architecture...")
@@ -42,15 +41,15 @@ def run_sanity_check(data_root):
     preds = model(images)
     
     print(f"     Binary Logits: {preds[0].shape}")
-    print(f"     Inst Logits  : {preds[1].shape}") # Should be 11
+    print(f"     Inst Logits  : {preds[1].shape}") # Should be 10
     print(f"     Dir Vectors  : {preds[2].shape}")
     
-    if preds[1].shape[1] == 11:
-        print("     ✅ Model outputs 11 channels as expected.")
+    if preds[1].shape[1] == 10:
+        print("     ✅ Model outputs 10 channels (fingernail classes) as expected.")
     else:
-        print(f"     ❌ ERROR: Model output {preds[1].shape[1]} channels, expected 11.")
+        print(f"     ❌ ERROR: Model output {preds[1].shape[1]} channels, expected 10.")
 
-    # 3. Test Loss Function & Direction Gradient
+    # 3. Test Loss Function
     print("\n[3/4] Testing Loss Functions...")
     criterion = NailVTONLoss()
     loss, loss_dict = criterion(preds, {
@@ -65,17 +64,15 @@ def run_sanity_check(data_root):
     print(f"     Direction Loss : {loss_dict['loss_direction']:.4f}")
     
     if loss_dict['loss_direction'] > 0:
-        print("     ✅ Direction Loss is ACTIVE (non-zero target vectors detected).")
-    else:
-        print("     ⚠️  WARNING: Direction Loss is 0. Check your annotations or target field.")
-
+        print("     ✅ Direction Loss is ACTIVE.")
+    
     # 4. Test Metric Masking
     print("\n[4/4] Testing IoU Masking...")
-    inst_iou = compute_instance_iou(preds[1], inst_t)
-    print(f"     Instance IoU (Excluding Background): {inst_iou:.4f}")
+    inst_iou = compute_instance_iou(preds[1], inst_t, binary_t)
+    print(f"     Instance IoU (Nail Regions Only): {inst_iou:.4f}")
     
     print("\n--- SANITY CHECK COMPLETE ---")
-    if bg_sum > 0 and preds[1].shape[1] == 11:
+    if nail_sum > 0 and preds[1].shape[1] == 10:
         print("Result: READY TO TRAIN 🚀")
     else:
         print("Result: FIX ERRORS BEFORE STARTING 🛑")
@@ -83,17 +80,16 @@ def run_sanity_check(data_root):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", help="Path to your COCO dataset (e.g. /kaggle/input/nails-dataset)")
+    parser.add_argument("--data_root", help="Path to your COCO dataset")
     args = parser.parse_args()
     
     root = args.data_root
     
-    # Auto-detection for Kaggle common paths
+    # Auto-detection
     if not root:
         common_paths = [
+            "/kaggle/input/datasets/almohamed132/nails-vton/train",
             "/kaggle/input/datasets/maamarmohamed12/nails-vton/train",
-            "/kaggle/input/nails-vton/train",
-            "/kaggle/input/nails-vton",
             "c:/Users/OrdiOne/Desktop/douccana marketplace - Copy/nails_segmentation_coco"
         ]
         for p in common_paths:
@@ -104,7 +100,5 @@ if __name__ == "__main__":
 
     if not root or not Path(root).exists():
         print(f"\n🛑 ERROR: Data root '{root}' not found.")
-        print("Please provide the correct path using --data_root")
-        print("Example: python sanity_check.py --data_root /kaggle/input/datasets/maamarmohamed12/nails-vton/train")
     else:
         run_sanity_check(root)

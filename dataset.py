@@ -31,7 +31,7 @@ import torchvision.transforms.functional as TF
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-MAX_INSTANCES = 11      # Channel 0: Background, Channels 1-10: Up to 10 Nails
+MAX_INSTANCES = 10      # Channels 0-9: Up to 10 Nails
 IMAGE_SIZE    = 512
 MEAN          = [0.485, 0.456, 0.406]
 STD           = [0.229, 0.224, 0.225]
@@ -266,16 +266,13 @@ class NailDataset(Dataset):
             binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
         binary_t = torch.from_numpy(binary_np).clone().unsqueeze(0)   # (1, H, W)
 
-        # ── Instance masks — one-hot (11, H, W) ──────────────────────────────
-        # Channel 0 is background. Channels 1-10 are for nails.
+        # ── Instance masks — one-hot (10, H, W) ──────────────────────────────
         inst_np = np.zeros((MAX_INSTANCES, S, S), dtype=np.float32)
         for i, m in enumerate(masks_resized):
-            if i + 1 < MAX_INSTANCES:
-                inst_np[i+1] = np.array(m, dtype=np.float32) / 255.0
+            if i < MAX_INSTANCES:
+                inst_np[i] = np.array(m, dtype=np.float32) / 255.0
         
-        # Background channel (0) is 1.0 where no nail is present
-        inst_np[0] = 1.0 - np.max(inst_np[1:], axis=0)
-        inst_t = torch.from_numpy(inst_np).clone()                     # (11, H, W)
+        inst_t = torch.from_numpy(inst_np).clone()                     # (10, H, W)
 
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
@@ -295,11 +292,11 @@ class NailDataset(Dataset):
         for m in masks_resized:
             m.close()
 
-        # ── Finger id tensor (11,) — 0 for background slot ────────────────────
+        # ── Finger id tensor (10,) ────────────────────
         finger_t = torch.zeros(MAX_INSTANCES, dtype=torch.long)
         for i, lbl in enumerate(finger_labels):
-            if i + 1 < MAX_INSTANCES:
-                finger_t[i+1] = lbl
+            if i < MAX_INSTANCES:
+                finger_t[i] = lbl
 
         return {
             "image"          : img_t,                          # (3,  H, W)

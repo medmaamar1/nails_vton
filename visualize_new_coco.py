@@ -102,6 +102,6 @@ def visualize_mapping_with_image(img_path, bboxes, segmentations, labels, title,
     print(f"  -> Visual confirmation saved to: {save_path}")
 
 if __name__ == "__main__":
-    test_dir = "/kaggle/input/datasets/maamarmohamed12/nails-vton/train"
+    test_dir = "/kaggle/input/datasets/almohamed132/nails-vton/train"
     print("Testing mapping on new dataset...")
     visualize_new_dataset_mapping(test_dir, num_samples=10)
