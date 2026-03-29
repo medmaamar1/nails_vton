@@ -37,16 +37,15 @@ class DirectionLoss(nn.Module):
         """
         pred_dir   : (B, 2, H, W)
         target_dir : (B, 2, H, W) normalized + (0,0) mask
+        
+        Strict Equation 3 (arXiv:1906.02222): 1/(H*W) * sum(||u_pred - u_target||^2)
         """
-        magnitude  = target_dir.norm(dim=1, keepdim=True)
-        valid_mask = (magnitude > 1e-6).squeeze(1)
-
-        if not valid_mask.any():
-            return torch.tensor(0.0, device=pred_dir.device, requires_grad=True)
-
-        diff = pred_dir - target_dir
-        l2_sq = (diff ** 2).sum(dim=1)
-        return l2_sq[valid_mask].mean()
+        B, C, H, W = pred_dir.shape
+        diff  = pred_dir - target_dir
+        l2_sq = (diff ** 2).sum(dim=1)  # (B, H, W)
+        
+        # We sum over all pixels and divide by the total area B*H*W
+        return l2_sq.sum() / (B * H * W)
 
 
 # ── Binary Segmentation Loss ──────────────────────────────────────────────────

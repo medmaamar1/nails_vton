@@ -110,26 +110,39 @@ def assign_finger_ids(bboxes):
 def compute_direction_field(mask_np, bbox):
     """
     Single-nail direction field: each foreground pixel gets a unit vector
-    pointing from bbox bottom-centre (base) to bbox top-centre (tip).
-
-    Returns (2, H, W) float32.  All-zero outside the mask.
-    """
-    H, W = mask_np.shape
-    x, y, w, h = bbox
+    pointing from the nail base to the nail tip.
     
-    # Ensure height is at least 1 pixel to prevent zero-norm vectors
-    h = max(h, 1.0)
+    Strict Paper Parity: 
+    - We compute the Principal Axis of the nail mask.
+    - We flip the sign so it points away from the palm (towards bbox top).
+    - We ensure magnitude = 1.0 (Section 3.3).
+    """
+    coords = np.argwhere(mask_np > 127)
+    if len(coords) < 10:
+        return np.zeros((2, mask_np.shape[0], mask_np.shape[1]), dtype=np.float32)
 
-    vx = 0.0                        # tip and base share the same x-centre
-    vy = -1.0                       # Direction is always upwards (-y) in this simple model
+    # PCA to find the primary axis (elongation)
+    mean = coords.mean(axis=0)
+    diff = coords - mean
+    cov  = np.dot(diff.T, diff)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    
+    # The largest eigenvalue (index 1) corresponds to the nail's length axis
+    vy, vx = eigvecs[:, 1]
+    
+    # Orient the vector so it points "upward" in the bounding box coordinate frame
+    # (i.e. towards the top of the nail relative to the centroid)
+    # We compare with the vector from centroid to the top-middle of the bbox
+    if vy > 0: # In image coords, +Y is DOWN. vy > 0 means pointing DOWN.
+        vy, vx = -vy, -vx
 
+    # Final Unit Normalization
+    norm = np.sqrt(vx**2 + vy**2) + 1e-8
+    vx, vy = vx/norm, vy/norm
+
+    H, W = mask_np.shape
     fg = (mask_np > 127).astype(np.float32)
-    if fg.sum() == 0:
-        return np.zeros((2, H, W), dtype=np.float32)
-
-    dx = fg * vx
-    dy = fg * vy
-    return np.stack([dx, dy], axis=0)              # (2, H, W)
+    return np.stack([fg * vx, fg * vy], axis=0)  # (2, H, W)
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────

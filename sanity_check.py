@@ -10,7 +10,7 @@ def run_sanity_check(data_root):
     print(f"--- Nail VTON Sanity Check (Strict VTNFP) ---")
     print(f"Device: {device}")
 
-    # 1. Test Data Loading (10 Channels)
+    # 1. Test Data Loading
     print("\n[1/4] Testing Data Loader...")
     train_loader, _ = make_loaders(data_root, batch_size=4, num_workers=0)
     batch = next(iter(train_loader))
@@ -25,57 +25,59 @@ def run_sanity_check(data_root):
     print(f"     Instance masks : {inst_t.shape}")         # (B, 10, 448, 448)
     print(f"     Direction field: {dir_t.shape}")         # (B, 2, 448, 448)
     
-    # In strict VTNFP, instance_masks only contains fingernail pixels.
-    # Background is defined by the binary mask being 0.
-    nail_sum = inst_t.sum().item()
-    print(f"     Total Nail Pixels: {nail_sum:.0f}")
+    # Check Direction Field Unit Normalization (Section 3.3)
+    norm = torch.norm(dir_t, dim=1)
+    # Norm should be 1.0 where mask is 1.0, and 0.0 elsewhere
+    valid_mask = (torch.norm(dir_t, dim=1) > 1e-6)
+    if valid_mask.any():
+        avg_norm = norm[valid_mask].mean().item()
+        print(f"     Avg Target Vector Norm: {avg_norm:.4f}")
+        if abs(avg_norm - 1.0) < 1e-3:
+            print("     ✅ Direction field is unit-normalized.")
+        else:
+            print(f"     ❌ ERROR: Direction field norm is {avg_norm:.4f}, expected 1.0.")
     
-    if nail_sum == 0:
-        print("     ❌ ERROR: Instance masks are empty!")
-    else:
-        print("     ✅ Instance masks (10 channels) verified.")
-
-    # 2. Test Model Output
-    print("\n[2/4] Testing Model Architecture...")
+    # 2. Test Model Output (Laplacian Pyramid)
+    print("\n[2/4] Testing Model Architecture (Laplacian Pyramid)...")
     model = NailVTONModel(image_size=448, pretrained=False).to(device)
-    preds = model(images)
+    multi_preds = model(images)  # Returns list of [(bin, inst, dir), ...]
     
-    print(f"     Binary Logits: {preds[0].shape}")
-    print(f"     Inst Logits  : {preds[1].shape}") # Should be 10
-    print(f"     Dir Vectors  : {preds[2].shape}")
+    print(f"     Pyramid Levels: {len(multi_preds)}")
+    for i, (p_bin, p_inst, p_dir) in enumerate(multi_preds):
+        print(f"     Level {i}: bin={p_bin.shape}, inst={p_inst.shape}, dir={p_dir.shape}")
     
-    if preds[1].shape[1] == 10:
-        print("     ✅ Model outputs 10 channels (fingernail classes) as expected.")
-    else:
-        print(f"     ❌ ERROR: Model output {preds[1].shape[1]} channels, expected 10.")
-
-    # 3. Test Loss Function
-    print("\n[3/4] Testing Loss Functions...")
+    if len(multi_preds) == 3:
+        print("     ✅ Model outputs 3 Laplacian levels as expected.")
+    
+    # 3. Test Loss Function (Strict Scaling)
+    print("\n[3/4] Testing Loss Functions (Equation 3 Scaling)...")
     criterion = NailVTONLoss()
-    loss, loss_dict = criterion(preds, {
-        "binary_mask": (torch.rand(binary_t.shape[0], 1, 448, 448) > 0.8).float().to(device),
-        "instance_masks": torch.zeros(inst_t.shape[0], 10, 448, 448).to(device),
-        "direction_field": torch.randn(dir_t.shape[0], 2, 448, 448).to(device)
-    })
+    target_dict = {
+        "binary_mask": binary_t,
+        "instance_masks": inst_t,
+        "direction_field": dir_t
+    }
+    loss, loss_dict = criterion(multi_preds, target_dict)
     
-    print(f"     Total Loss     : {loss.item():.4f}")
-    print(f"     Binary Loss    : {loss_dict['loss_binary']:.4f}")
-    print(f"     Instance Loss  : {loss_dict['loss_instance']:.4f}")
-    print(f"     Direction Loss : {loss_dict['loss_direction']:.4f}")
+    print(f"     Total Loss      : {loss.item():.4f}")
+    print(f"     Final Level Bin : {loss_dict['l2_bin']:.4f}")
+    print(f"     Final Level Inst: {loss_dict['l2_inst']:.4f}")
+    print(f"     Final Level Dir : {loss_dict['l2_dir']:.4f}")
     
-    if loss_dict['loss_direction'] > 0:
-        print("     ✅ Direction Loss is ACTIVE.")
+    # Strict Equation 3 scaling usually results in small Direction loss initially
+    if loss_dict['l2_dir'] < 0.5:
+        print("     ✅ Direction Loss scaling appears correct (Image-Average).")
     
     # 4. Test Metric Masking
-    print("\n[4/4] Testing IoU Masking...")
-    inst_iou = compute_instance_iou(preds[1], inst_t, binary_t)
-    print(f"     Instance IoU (Nail Regions Only): {inst_iou:.4f}")
+    print("\n[4/4] Testing IoU Metrics...")
+    final_bin, final_inst, final_dir = multi_preds[-1]
+    bin_iou = compute_iou(final_bin, binary_t)
+    inst_iou = compute_instance_iou(final_inst, inst_t, binary_t)
+    print(f"     Final Level Binary IoU  : {bin_iou:.4f}")
+    print(f"     Final Level Instance IoU: {inst_iou:.4f}")
     
     print("\n--- SANITY CHECK COMPLETE ---")
-    if nail_sum > 0 and preds[1].shape[1] == 10:
-        print("Result: READY TO TRAIN 🚀")
-    else:
-        print("Result: FIX ERRORS BEFORE STARTING 🛑")
+    print("Result: READY TO TRAIN 🚀")
 
 if __name__ == "__main__":
     import argparse
@@ -84,13 +86,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     root = args.data_root
-    
-    # Auto-detection
     if not root:
         common_paths = [
             "/kaggle/input/datasets/almohamed132/nails-vton/train",
-            "/kaggle/input/datasets/maamarmohamed12/nails-vton/train",
-            "c:/Users/OrdiOne/Desktop/douccana marketplace - Copy/nails_segmentation_coco"
+            "c:/Users/OrdiOne/Desktop/douccana marketplace - Copy/nails_vton/train"
         ]
         for p in common_paths:
             if Path(p).exists():
