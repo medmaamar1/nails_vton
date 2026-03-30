@@ -13,7 +13,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
-MAX_INSTANCES = 10
 
 class DepthwiseSeparable(nn.Module):
     def __init__(self, in_ch, out_ch):
@@ -72,7 +71,7 @@ class MobileNetV2Prefix(nn.Module):
         return feat_s4, feat_final
 
 class PyramidHeads(nn.Module):
-    def __init__(self, in_ch, max_instances=10):
+    def __init__(self, in_ch):
         super().__init__()
         # 1:1 Figure 2 Output Branch:
         # F2' (320) -> '320 W' (Depthwise) -> 'Projection 10' -> 'shared features 10'
@@ -82,20 +81,17 @@ class PyramidHeads(nn.Module):
         # Branch from shared features:
         # Fgbg: 1x1 conv to 1 channel (Mathematically equivalent to '1x1 conv 2' + Softmax in paper)
         self.binary    = nn.Conv2d(10, 1, 1)
-        # Instances: '1x1 conv 5'
-        self.instances = nn.Conv2d(10, max_instances, 1)
         # Direction: '1x1 conv 2'
         self.direction = nn.Conv2d(10, 2, 1)
 
     def forward(self, x):
         shared_feat = self.shared(x)
-        return self.binary(shared_feat), self.instances(shared_feat), self.direction(shared_feat)
+        return self.binary(shared_feat), self.direction(shared_feat)
 
 class NailVTONModel(nn.Module):
-    def __init__(self, image_size=448, max_instances=5, pretrained=True):
+    def __init__(self, image_size=448, pretrained=True):
         super().__init__()
         self.image_size    = image_size
-        self.max_instances = max_instances
 
         # TWO independent encoders (no weight sharing) to match paper's capacity
         # Level 0 (low-res): Input H/2. Stage 4 is H/16, Stage 8 is H/32 (with surgery).
@@ -115,9 +111,9 @@ class NailVTONModel(nn.Module):
         self.fusion_high = CFF(FUSE, HIGH_CH, FUSE)
 
         # Laplacian Pyramid heads
-        self.head_l0 = PyramidHeads(FUSE, max_instances)
-        self.head_l1 = PyramidHeads(FUSE, max_instances)
-        self.head_final = PyramidHeads(FUSE, max_instances)
+        self.head_l0 = PyramidHeads(FUSE)
+        self.head_l1 = PyramidHeads(FUSE)
+        self.head_final = PyramidHeads(FUSE)
 
     def forward(self, x):
         with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled()):
@@ -130,29 +126,27 @@ class NailVTONModel(nn.Module):
         # 1. Low-Resolution Fusion (Level 0 side-output)
         # Matches Section 3.2: "fuses H/16 x W/16 features from stage_low4 with upsampled stage_low8"
         f0 = self.fusion_low(feat_low_s8, feat_low_s4)
-        out0_bin, out0_inst, out0_dir = self.head_l0(f0)
+        out0_bin, out0_dir = self.head_l0(f0)
 
         # 2. High-Resolution Fusion (Level 1 side-output)
         # Matches Section 3.2: "fuses resulting features with H/8 x W/8 features from stage_high4"
         f1 = self.fusion_high(f0, feat_high)
-        out1_bin, out1_inst, out1_dir = self.head_l1(f1)
+        out1_bin, out1_dir = self.head_l1(f1)
 
         # 3. Final Output (Upsampled to full resolution)
-        out2_bin, out2_inst, out2_dir = self.head_final(f1)
+        out2_bin, out2_dir = self.head_final(f1)
         
         def _norm_dir(d):
             return d / d.norm(dim=1, keepdim=True).clamp(min=1e-6)
 
-        p0 = (out0_bin, out0_inst, _norm_dir(out0_dir))
-        p1 = (out1_bin, out1_inst, _norm_dir(out1_dir))
+        p0 = (out0_bin, _norm_dir(out0_dir))
+        p1 = (out1_bin, _norm_dir(out1_dir))
         
         final_bin = F.interpolate(out2_bin, size=(self.image_size, self.image_size),
                                   mode="bilinear", align_corners=False)
-        final_inst = F.interpolate(out2_inst, size=(self.image_size, self.image_size),
-                                   mode="bilinear", align_corners=False)
         final_dir = F.interpolate(out2_dir, size=(self.image_size, self.image_size),
                                   mode="bilinear", align_corners=False)
-        pf = (final_bin, final_inst, _norm_dir(final_dir))
+        pf = (final_bin, _norm_dir(final_dir))
 
         return [p0, p1, pf]
 
@@ -160,10 +154,9 @@ class NailVTONModel(nn.Module):
     def predict(self, x, binary_thresh=0.5):
         self.eval()
         multi_preds = self(x)
-        final_bin, final_inst, final_dir = multi_preds[-1]
+        final_bin, final_dir = multi_preds[-1]
         return (
             torch.sigmoid(final_bin) > binary_thresh,
-            torch.softmax(final_inst, dim=1),
             final_dir,
         )
 
@@ -181,7 +174,7 @@ if __name__ == "__main__":
     outs = model(dummy)
     
     print(f"Laplacian levels: {len(outs)}")
-    for i, (b, inst, d) in enumerate(outs):
-        print(f"  Level {i}: bin={b.shape}, inst={inst.shape}, dir={d.shape}")
+    for i, (b, d) in enumerate(outs):
+        print(f"  Level {i}: bin={b.shape}, dir={d.shape}")
 
     print("\nModel Architecture Check PASSED")

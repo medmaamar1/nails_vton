@@ -5,17 +5,8 @@ Loads Roboflow v50 COCO Segmentation JSON.
 Produces per-image:
   1. image           : (3, H, W)       float32 normalised
   2. binary_mask     : (1, H, W)       float32  — union of all nail masks
-  3. instance_masks  : (10, H, W)      float32  — one-hot, channel i = nail i
-  4. direction_field : (2, H, W)       float32  — unit vector base→tip per nail pixel
-  5. finger_ids      : (10,)           int64    — finger label per slot (0=unused,
-                                                  1=thumb, 2=index, 3=middle,
-                                                  4=ring, 5=pinky)
-  6. n_instances     : scalar          int64
-
-Finger identity is derived geometrically — no extra annotation needed:
-  • Thumb  → largest bbox area AND y-centroid is an outlier (below the finger row)
-  • Fingers 2-5 → sorted by x-centroid: leftmost=pinky … rightmost=index
-    (works for either hand; label assignment is position-relative)
+  3. direction_field : (2, H, W)       float32  — unit vector base→tip per nail pixel
+  4. n_instances     : scalar          int64
 """
 
 import json
@@ -31,18 +22,9 @@ import torchvision.transforms.functional as TF
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-MAX_INSTANCES = 5      # 5 Semantic Channels (Thumb .. Pinky)
 IMAGE_SIZE    = 448
 MEAN          = [0.485, 0.456, 0.406]
 STD           = [0.229, 0.224, 0.225]
-
-# Finger label codes
-FINGER_UNUSED = 0
-FINGER_THUMB  = 1
-FINGER_INDEX  = 2
-FINGER_MIDDLE = 3
-FINGER_RING   = 4
-FINGER_PINKY  = 5
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -55,56 +37,6 @@ def polygon_to_mask(polygon, height, width):
         ImageDraw.Draw(mask).polygon(xy, fill=255)
     return mask
 
-
-def assign_finger_ids(bboxes):
-    """
-    Given a list of bboxes [[x,y,w,h], ...] for one image, return a list of
-    finger label codes of the same length.
-
-    Algorithm:
-      1. Compute centroid (cx, cy) and area for each nail.
-      2. Identify thumb: largest area AND cy > median_cy of all nails.
-         If no nail satisfies both, fall back to largest area alone.
-      3. Sort remaining nails by cx (left → right).
-         Assign labels left-to-right: pinky(5) → ring(4) → middle(3) → index(2).
-         If fewer than 4 remain, assign from pinky inward.
-    """
-    n = len(bboxes)
-    if n == 0:
-        return []
-
-    cx_list = [x + w / 2.0 for x, y, w, h in bboxes]
-    cy_list = [y + h / 2.0 for x, y, w, h in bboxes]
-    area_list = [w * h for x, y, w, h in bboxes]
-
-    median_cy = sorted(cy_list)[len(cy_list) // 2]
-
-    # Find thumb index
-    thumb_idx = None
-    best_area = -1
-    for i, (area, cy) in enumerate(zip(area_list, cy_list)):
-        if cy > median_cy and area > best_area:
-            best_area = area
-            thumb_idx = i
-    if thumb_idx is None:                          # fallback: just largest
-        thumb_idx = int(np.argmax(area_list))
-
-    # Remaining nails sorted by cx
-    remaining = [(i, cx_list[i]) for i in range(n) if i != thumb_idx]
-    remaining.sort(key=lambda t: t[1])             # left → right
-
-    # Label map: position 0=leftmost → pinky, last=rightmost → index
-    pos_to_label = [FINGER_PINKY, FINGER_RING, FINGER_MIDDLE, FINGER_INDEX]
-
-    labels = [FINGER_UNUSED] * n
-    labels[thumb_idx] = FINGER_THUMB
-    for pos, (orig_idx, _) in enumerate(remaining):
-        if pos < len(pos_to_label):
-            labels[orig_idx] = pos_to_label[pos]
-        else:
-            labels[orig_idx] = FINGER_UNUSED       # >4 non-thumb nails (rare)
-
-    return labels
 
 
 def compute_direction_field(mask_np, bbox):
@@ -188,13 +120,8 @@ class NailDataset(Dataset):
 
         for img in coco["images"]:
             iid = img["id"]
-            # Skip if no annotations or if there are no successfully identified fingers (>0)
+            # Skip if no annotations
             if iid not in self.id_to_anns or not self.id_to_anns[iid]:
-                continue
-            
-            # Check if this image has at least one "known" finger
-            has_valid_finger = any(ann.get("category_id", 0) > 0 for ann in self.id_to_anns[iid])
-            if not has_valid_finger:
                 continue
 
             fname = img["file_name"]
@@ -243,15 +170,12 @@ class NailDataset(Dataset):
         # ── Build per-nail masks at original resolution ───────────────────────
         masks_pil   = []
         bboxes_orig = []
-        category_ids = []
-
         for ann in anns:
             seg = ann.get("segmentation", [])
             if not seg or len(seg[0]) < 6:
                 continue
             masks_pil.append(polygon_to_mask(seg[0], orig_h, orig_w))
             bboxes_orig.append(ann["bbox"])
-            category_ids.append(ann.get("category_id", 0))
 
         # ── Resize to image_size ──────────────────────────────────────────────
         sx = self.image_size / orig_w
@@ -285,19 +209,6 @@ class NailDataset(Dataset):
             binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
         binary_t = torch.from_numpy(binary_np).clone().unsqueeze(0)   # (1, H, W)
 
-        # ── Instance masks — one-hot (5, H, W) ──────────────────────────────
-        inst_np = np.zeros((MAX_INSTANCES, S, S), dtype=np.float32)
-        inst_valid_np = np.zeros((S, S), dtype=np.float32)
-        
-        for m, cat_id in zip(masks_resized, category_ids):
-            m_np = np.array(m, dtype=np.float32) / 255.0
-            if 1 <= cat_id <= 5:
-                ch = cat_id - 1
-                inst_np[ch] = np.maximum(inst_np[ch], m_np)
-                inst_valid_np = np.maximum(inst_valid_np, m_np)
-        
-        inst_t = torch.from_numpy(inst_np).clone()                     # (5, H, W)
-        inst_valid_t = torch.from_numpy(inst_valid_np).clone().unsqueeze(0) # (1, H, W)
 
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
@@ -317,15 +228,10 @@ class NailDataset(Dataset):
         for m in masks_resized:
             m.close()
 
-        finger_t = torch.tensor(category_ids + [0]*(10 - len(category_ids)), dtype=torch.long)[:10]
-
         return {
             "image"          : img_t,                          # (3,  H, W)
             "binary_mask"    : binary_t,                       # (1,  H, W)
-            "instance_masks" : inst_t,                         # (5, H, W)
-            "instance_valid" : inst_valid_t,                   # (1, H, W)
             "direction_field": dir_t,                          # (2,  H, W)
-            "finger_ids"     : finger_t,                       # (10,)
             "n_instances"    : torch.tensor(len(masks_resized), dtype=torch.long),
             "image_id"       : image_id,
         }
@@ -406,9 +312,7 @@ if __name__ == "__main__":
 
     print("image          :", sample["image"].shape,           sample["image"].dtype)
     print("binary_mask    :", sample["binary_mask"].shape,     sample["binary_mask"].max().item())
-    print("instance_masks :", sample["instance_masks"].shape,  sample["instance_masks"].sum().item(), "fg pixels")
     print("direction_field:", sample["direction_field"].shape, sample["direction_field"].abs().max().item())
-    print("finger_ids     :", sample["finger_ids"].tolist())
     print("n_instances    :", sample["n_instances"].item())
     print("image_id       :", sample["image_id"])
     print("\nDataset sanity check PASSED ✓")

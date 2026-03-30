@@ -24,15 +24,15 @@ from torch.amp import GradScaler, autocast
 sys.path.insert(0, str(Path(__file__).parent))
 from dataset import make_loaders
 from model   import NailVTONModel
-from losses  import NailVTONLoss, compute_iou, compute_instance_iou
+from losses  import NailVTONLoss, compute_iou
 
 
 # ── Args ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
-    p.add_argument("--data_root",   default="/kaggle/input/datasets/almohamed132/nails-vton/train")
-    p.add_argument("--json_path",   default=None, help="Explicit path to _annotations_mapped_v2.coco.json")
+    p.add_argument("--data_root",   default="/kaggle/input/datasets/maamarmohamed/nail-segmentation/train")
+    p.add_argument("--json_path",   default=None, help="Explicit path to annotations (optional)")
     p.add_argument("--epochs",      type=int,   default=100)
     p.add_argument("--batch_size",  type=int,   default=32)
     p.add_argument("--patience",    type=int,   default=10, 
@@ -65,7 +65,6 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
     model.train()
     total_loss     = 0.0
     total_bin_iou  = 0.0
-    total_inst_iou = 0.0
     total_dir_loss = 0.0
     n_batches      = len(loader)
 
@@ -74,10 +73,9 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
-            "instance_masks" : batch["instance_masks"].to(device,  non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
-        del batch  # Release finger_ids, n_instances, image_id CPU tensors immediately
+        del batch  # Release unused CPU tensors immediately
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -102,11 +100,9 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         # Pull final level for metrics
         final_preds = preds[-1]
         bin_iou  = compute_iou(final_preds[0].detach(), targets["binary_mask"])
-        inst_iou = compute_instance_iou(final_preds[1].detach(), targets["instance_masks"], targets["binary_mask"])
         
         total_loss     += current_loss
         total_bin_iou  += bin_iou
-        total_inst_iou += inst_iou
 
         if (i + 1) % 50 == 0:
             mem = psutil.virtual_memory().used / (1024**3)
@@ -114,7 +110,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             l_dir_now = loss_dict.get('l2_dir', 0.0)
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={current_loss:.4f}  "
-                  f"bin_iou={bin_iou:.4f}  inst_iou={inst_iou:.4f}  "
+                  f"bin_iou={bin_iou:.4f}  "
                   f"dir_loss={l_dir_now:.4f} | "
                   f"RAM={mem:.1f}GB")
             
@@ -127,7 +123,6 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
-            total_inst_iou / n_batches,
             total_dir_loss / n_batches)
 
 
@@ -136,7 +131,6 @@ def validate(model, loader, criterion, device, use_amp):
     model.eval()
     total_loss     = 0.0
     total_bin_iou  = 0.0
-    total_inst_iou = 0.0
     total_dir_loss = 0.0
     n_batches      = len(loader)
 
@@ -145,7 +139,6 @@ def validate(model, loader, criterion, device, use_amp):
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
-            "instance_masks" : batch["instance_masks"].to(device,  non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
         del batch  # Release unused CPU tensors immediately
@@ -157,14 +150,12 @@ def validate(model, loader, criterion, device, use_amp):
         final_preds = preds[-1]
         total_loss     += loss_dict["loss_total"]
         total_bin_iou  += compute_iou(final_preds[0].detach(), targets["binary_mask"])
-        total_inst_iou += compute_instance_iou(final_preds[1].detach(), targets["instance_masks"], targets["binary_mask"])
         total_dir_loss += loss_dict.get('l2_dir', 0.0)
 
         del image, targets, preds
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
-            total_inst_iou / n_batches,
             total_dir_loss / n_batches)
 
 
@@ -261,30 +252,28 @@ def main():
         print(f"Epoch {epoch+1}/{args.epochs}  "
               f"LR=[enc={current_lrs[0]}, dec={current_lrs[1]}]")
 
-        train_loss, train_bin_iou, train_inst_iou, train_dir_loss = train_one_epoch(
+        train_loss, train_bin_iou, train_dir_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, device, use_amp
         )
-        val_loss, val_bin_iou, val_inst_iou, val_dir_loss = validate(
+        val_loss, val_bin_iou, val_dir_loss = validate(
             model, val_loader, criterion, device, use_amp
         )
 
         elapsed = time.time() - t0
         print(f"Epoch {epoch+1} — {elapsed:.0f}s | "
               f"train loss={train_loss:.4f}  "
-              f"bin={train_bin_iou:.4f}  inst={train_inst_iou:.4f}  dir={train_dir_loss:.4f} | "
+              f"bin={train_bin_iou:.4f}  dir={train_dir_loss:.4f} | "
               f"val loss={val_loss:.4f}  "
-              f"val_bin={val_bin_iou:.4f}  val_inst={val_inst_iou:.4f}  val_dir={val_dir_loss:.4f}")
+              f"val_bin={val_bin_iou:.4f}  val_dir={val_dir_loss:.4f}")
 
         # ── Checkpointing ──────────────────────────────────────────────────────
         record = {
             "epoch"          : epoch,
             "train_loss"     : train_loss,
             "train_bin_iou"  : train_bin_iou,
-            "train_inst_iou" : train_inst_iou,
             "train_dir_loss" : train_dir_loss,
             "val_loss"       : val_loss,
             "val_bin_iou"    : val_bin_iou,
-            "val_inst_iou"   : val_inst_iou,
             "val_dir_loss"   : val_dir_loss,
         }
         history.append(record)
