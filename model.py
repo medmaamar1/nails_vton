@@ -45,66 +45,74 @@ class CFF(nn.Module):
         return self.act(self.low_conv(low_up) + self.high_conv(high_feat))
 
 class MobileNetV2Prefix(nn.Module):
-    """Encapsulates a prefix of a MobileNetV2 backbone."""
-    def __init__(self, stages_idx, pretrained=True, surgery=False):
+    """Encapsulates a prefix of a MobileNetV2 backbone, optionally returning split features."""
+    def __init__(self, stages_idx, split_idx=None, pretrained=True, surgery=False):
         super().__init__()
+        self.split_idx = split_idx
         weights = models.MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None
         backbone = models.mobilenet_v2(weights=weights)
-        self.features = nn.Sequential(*backbone.features[:stages_idx])
+        self.features = nn.Sequential(*backbone.features[:max(stages_idx, split_idx or 0)])
         
         if surgery:
             # Low-res path surgery: Stride 32x -> 16x
-            # We change stage 6 (index 14) stride to 1, and stages 7-8 to dilated.
-            # MobileNetV2 layer index 14 is the InvertedResidual that normally has stride 2.
+            # Standard index 14 has stride 2. Change to 1.
             if len(self.features) > 14:
                 self.features[14].conv[1][0].stride = (1, 1)
                 for i in range(14, len(self.features)):
-                    # Check if it has a depthwise layer (Conv2d with groups > 1)
-                    # For MobileNetV2, conv[1][0] is the depthwise convolution.
                     self.features[i].conv[1][0].dilation = (2, 2)
                     self.features[i].conv[1][0].padding = (2, 2)
 
     def forward(self, x):
-        return self.features(x)
-
-class SegHead(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.ds   = DepthwiseSeparable(in_ch, in_ch)
-        self.conv = nn.Conv2d(in_ch, out_ch, 1)
-
-    def forward(self, x):
-        x = self.ds(x)
-        return self.conv(x)
+        if self.split_idx is None:
+            return self.features(x)
+        
+        # Split features for H/16 skip-connection (Section 3.2)
+        feat_s4 = self.features[:self.split_idx](x)
+        feat_final = self.features[self.split_idx:](feat_s4)
+        return feat_s4, feat_final
 
 class PyramidHeads(nn.Module):
     def __init__(self, in_ch, max_instances=10):
         super().__init__()
-        self.binary    = SegHead(in_ch, 1)
-        self.instances = SegHead(in_ch, max_instances)
-        self.direction = SegHead(in_ch, 2)
+        # 1:1 Figure 2 Output Branch:
+        # F2' (320) -> '320 W' (Depthwise) -> 'Projection 10' -> 'shared features 10'
+        # This reduces FLOPs drastically compared to 3 separate SegHeads
+        self.shared = DepthwiseSeparable(in_ch, 10)
+        
+        # Branch from shared features:
+        # Fgbg: 1x1 conv to 1 channel (Mathematically equivalent to '1x1 conv 2' + Softmax in paper)
+        self.binary    = nn.Conv2d(10, 1, 1)
+        # Instances: '1x1 conv 5'
+        self.instances = nn.Conv2d(10, max_instances, 1)
+        # Direction: '1x1 conv 2'
+        self.direction = nn.Conv2d(10, 2, 1)
 
     def forward(self, x):
-        return self.binary(x), self.instances(x), self.direction(x)
+        shared_feat = self.shared(x)
+        return self.binary(shared_feat), self.instances(shared_feat), self.direction(shared_feat)
 
 class NailVTONModel(nn.Module):
-    def __init__(self, image_size=448, max_instances=10, pretrained=True):
+    def __init__(self, image_size=448, max_instances=5, pretrained=True):
         super().__init__()
         self.image_size    = image_size
         self.max_instances = max_instances
 
         # TWO independent encoders (no weight sharing) to match paper's capacity
-        # Level 0 (low-res): 1/16 res, 320 channels (stages 1..8)
-        self.encoder_low = MobileNetV2Prefix(stages_idx=18, pretrained=pretrained, surgery=True)
-        # Level 1 (high-res): 1/8 res, 32 channels (stages 1..4)
+        # Level 0 (low-res): Input H/2. Stage 4 is H/16, Stage 8 is H/32 (with surgery).
+        self.encoder_low = MobileNetV2Prefix(stages_idx=18, split_idx=7, pretrained=pretrained, surgery=True)
+        # Level 1 (high-res): Input H. Stage 4 is H/8
         self.encoder_high = MobileNetV2Prefix(stages_idx=7, pretrained=pretrained, surgery=False)
 
         HIGH_CH = 32
-        LOW_CH  = 320
+        LOW_S4_CH = 32
+        LOW_S8_CH  = 320
         FUSE    = 320
 
-        self.fusion0 = CFF(LOW_CH, HIGH_CH, FUSE)
-        self.fusion1 = CFF(FUSE, HIGH_CH, FUSE)
+        # Fusion 0: Stage_low4 (H/16) + Upsampled Stage_low8 (H/32 -> H/16)
+        self.fusion_low = CFF(LOW_S8_CH, LOW_S4_CH, FUSE)
+        
+        # Fusion 1: Stage_high4 (H/8) + Upsampled Low_Features (H/16 -> H/8)
+        self.fusion_high = CFF(FUSE, HIGH_CH, FUSE)
 
         # Laplacian Pyramid heads
         self.head_l0 = PyramidHeads(FUSE, max_instances)
@@ -114,16 +122,19 @@ class NailVTONModel(nn.Module):
     def forward(self, x):
         with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled()):
             x_half    = F.interpolate(x, scale_factor=0.5, mode="bilinear", align_corners=False)
+            
             # Independent forward passes
             feat_high = self.encoder_high(x)
-            feat_low  = self.encoder_low(x_half)
+            feat_low_s4, feat_low_s8 = self.encoder_low(x_half)
 
-        # 1. First Fusion (Level 0 side-output)
-        f0 = self.fusion0(feat_low, feat_high)
+        # 1. Low-Resolution Fusion (Level 0 side-output)
+        # Matches Section 3.2: "fuses H/16 x W/16 features from stage_low4 with upsampled stage_low8"
+        f0 = self.fusion_low(feat_low_s8, feat_low_s4)
         out0_bin, out0_inst, out0_dir = self.head_l0(f0)
 
-        # 2. Second Fusion (Level 1 side-output)
-        f1 = self.fusion1(f0, feat_high)
+        # 2. High-Resolution Fusion (Level 1 side-output)
+        # Matches Section 3.2: "fuses resulting features with H/8 x W/8 features from stage_high4"
+        f1 = self.fusion_high(f0, feat_high)
         out1_bin, out1_inst, out1_dir = self.head_l1(f1)
 
         # 3. Final Output (Upsampled to full resolution)

@@ -31,7 +31,7 @@ import torchvision.transforms.functional as TF
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-MAX_INSTANCES = 10      # Channels 0-9: Up to 10 Nails
+MAX_INSTANCES = 5      # 5 Semantic Channels (Thumb .. Pinky)
 IMAGE_SIZE    = 448
 MEAN          = [0.485, 0.456, 0.406]
 STD           = [0.229, 0.224, 0.225]
@@ -148,13 +148,18 @@ def compute_direction_field(mask_np, bbox):
 # ── Dataset ────────────────────────────────────────────────────────────────────
 
 class NailDataset(Dataset):
-    def __init__(self, root, augment=False, image_size=IMAGE_SIZE):
+    def __init__(self, root, augment=False, image_size=IMAGE_SIZE, json_path=None):
         self.root       = Path(root)
         self.augment    = augment
         self.image_size = image_size
 
-        ann_path = self.root / "_annotations.coco.json"
-        with open(ann_path, "r") as f:
+        if json_path is not None:
+            ann_path = Path(json_path)
+            print(f"[NailDataset] Using custom JSON path: {ann_path}")
+        else:
+            ann_path = self.root / "_annotations.coco.json"
+            
+        with open(ann_path, "r", encoding='utf-8') as f:
             coco = json.load(f)
 
         # Pre-resolve image paths by scanning the directory (recursive).
@@ -183,10 +188,15 @@ class NailDataset(Dataset):
 
         for img in coco["images"]:
             iid = img["id"]
-            # Skip if no annotations
+            # Skip if no annotations or if there are no successfully identified fingers (>0)
             if iid not in self.id_to_anns or not self.id_to_anns[iid]:
                 continue
-                
+            
+            # Check if this image has at least one "known" finger
+            has_valid_finger = any(ann.get("category_id", 0) > 0 for ann in self.id_to_anns[iid])
+            if not has_valid_finger:
+                continue
+
             fname = img["file_name"]
             rf_hash = fname.split(".rf.")[-1].split(".")[0] if ".rf." in fname else None
             
@@ -233,19 +243,15 @@ class NailDataset(Dataset):
         # ── Build per-nail masks at original resolution ───────────────────────
         masks_pil   = []
         bboxes_orig = []
+        category_ids = []
 
-        for ann in anns[:MAX_INSTANCES]:
+        for ann in anns:
             seg = ann.get("segmentation", [])
             if not seg or len(seg[0]) < 6:
                 continue
             masks_pil.append(polygon_to_mask(seg[0], orig_h, orig_w))
             bboxes_orig.append(ann["bbox"])
-
-        # ── Finger identity ────────────────────────────────────────────────────
-        # We do NOT use the geometric heuristic here — finger identity is resolved
-        # at inference time via MediaPipe in the frontend. The AI only needs to
-        # learn to segment each nail as a distinct instance.
-        finger_labels = [FINGER_UNUSED] * len(bboxes_orig)
+            category_ids.append(ann.get("category_id", 0))
 
         # ── Resize to image_size ──────────────────────────────────────────────
         sx = self.image_size / orig_w
@@ -279,13 +285,19 @@ class NailDataset(Dataset):
             binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
         binary_t = torch.from_numpy(binary_np).clone().unsqueeze(0)   # (1, H, W)
 
-        # ── Instance masks — one-hot (10, H, W) ──────────────────────────────
+        # ── Instance masks — one-hot (5, H, W) ──────────────────────────────
         inst_np = np.zeros((MAX_INSTANCES, S, S), dtype=np.float32)
-        for i, m in enumerate(masks_resized):
-            if i < MAX_INSTANCES:
-                inst_np[i] = np.array(m, dtype=np.float32) / 255.0
+        inst_valid_np = np.zeros((S, S), dtype=np.float32)
         
-        inst_t = torch.from_numpy(inst_np).clone()                     # (10, H, W)
+        for m, cat_id in zip(masks_resized, category_ids):
+            m_np = np.array(m, dtype=np.float32) / 255.0
+            if 1 <= cat_id <= 5:
+                ch = cat_id - 1
+                inst_np[ch] = np.maximum(inst_np[ch], m_np)
+                inst_valid_np = np.maximum(inst_valid_np, m_np)
+        
+        inst_t = torch.from_numpy(inst_np).clone()                     # (5, H, W)
+        inst_valid_t = torch.from_numpy(inst_valid_np).clone().unsqueeze(0) # (1, H, W)
 
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
@@ -305,16 +317,13 @@ class NailDataset(Dataset):
         for m in masks_resized:
             m.close()
 
-        # ── Finger id tensor (10,) ────────────────────
-        finger_t = torch.zeros(MAX_INSTANCES, dtype=torch.long)
-        for i, lbl in enumerate(finger_labels):
-            if i < MAX_INSTANCES:
-                finger_t[i] = lbl
+        finger_t = torch.tensor(category_ids + [0]*(10 - len(category_ids)), dtype=torch.long)[:10]
 
         return {
             "image"          : img_t,                          # (3,  H, W)
             "binary_mask"    : binary_t,                       # (1,  H, W)
-            "instance_masks" : inst_t,                         # (10, H, W)
+            "instance_masks" : inst_t,                         # (5, H, W)
+            "instance_valid" : inst_valid_t,                   # (1, H, W)
             "direction_field": dir_t,                          # (2,  H, W)
             "finger_ids"     : finger_t,                       # (10,)
             "n_instances"    : torch.tensor(len(masks_resized), dtype=torch.long),
@@ -347,7 +356,7 @@ class NailDataset(Dataset):
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
 
-def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
+def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_path=None):
     root = Path(dataset_root)
     
     # If standard 'train' subfolder exists, use it; otherwise use the root itself.
@@ -355,18 +364,29 @@ def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
     train_root = root / "train" if (root / "train").exists() else root
     valid_root = root / "valid"
 
-    train_ds = NailDataset(train_root, augment=True)
+    train_ds = NailDataset(train_root, augment=True, json_path=json_path)
 
     if valid_root.exists():
-        val_ds = NailDataset(valid_root, augment=False)
+        # Typically valid subfolder has its own JSON, but we'll pass the custom one if they are explicitly bypassing the defaults
+        val_ds = NailDataset(valid_root, augment=False, json_path=json_path)
     else:
+        import copy
         n_val   = int(len(train_ds) * val_split)
         n_train = len(train_ds) - n_val
-        train_ds, val_ds = torch.utils.data.random_split(
+        
+        train_subset, val_subset = torch.utils.data.random_split(
             train_ds, [n_train, n_val],
             generator=torch.Generator().manual_seed(42)
         )
-        print(f"[make_loaders] Auto-split → train={n_train}, val={n_val}")
+        
+        # Validation shouldn't be augmented (keeps loss metrics stable)
+        base_val_ds = copy.deepcopy(train_ds)
+        base_val_ds.augment = False
+        
+        train_ds = train_subset
+        val_ds   = torch.utils.data.Subset(base_val_ds, val_subset.indices)
+        
+        print(f"[make_loaders] Auto-split → train={n_train}, val={n_val} (Golden 'No-Aug' Validation)")
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=False,

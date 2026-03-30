@@ -98,6 +98,7 @@ class NailVTONLoss(nn.Module):
         H, W = size
         bin_t  = F.interpolate(targets["binary_mask"], size=(H, W), mode="nearest")
         inst_t = F.interpolate(targets["instance_masks"], size=(H, W), mode="nearest")
+        inst_valid_t = F.interpolate(targets.get("instance_valid", targets["binary_mask"]), size=(H, W), mode="nearest")
         # Direction field is float32 vectors, should use bilinear interpolation
         dir_t  = F.interpolate(targets["direction_field"], size=(H, W), mode="bilinear", align_corners=False)
         
@@ -105,7 +106,7 @@ class NailVTONLoss(nn.Module):
         norm  = dir_t.norm(dim=1, keepdim=True)
         dir_t = dir_t / norm.clamp(min=1e-6)
 
-        return {"binary_mask": bin_t, "instance_masks": inst_t, "direction_field": dir_t}
+        return {"binary_mask": bin_t, "instance_masks": inst_t, "instance_valid": inst_valid_t, "direction_field": dir_t}
 
     def forward(self, multi_predictions, targets):
         """
@@ -122,7 +123,7 @@ class NailVTONLoss(nn.Module):
             target_lvl = self._get_target_level(targets, (h, w))
             
             l_bin  = self.binary_loss(p_bin,   target_lvl["binary_mask"])
-            l_inst = self.instance_loss(p_inst, target_lvl["instance_masks"], target_lvl["binary_mask"])
+            l_inst = self.instance_loss(p_inst, target_lvl["instance_masks"], target_lvl["instance_valid"])
             l_dir  = self.direction_loss(p_dir,  target_lvl["direction_field"])
             
             l_lvl = l_bin + l_inst + l_dir
@@ -179,7 +180,8 @@ if __name__ == "__main__":
     # Fake targets at 512x512
     targets = {
         "binary_mask": (torch.rand(2, 1, 512, 512) > 0.8).float(),
-        "instance_masks": torch.zeros(2, 10, 512, 512),
+        "instance_masks": torch.zeros(2, 5, 512, 512),
+        "instance_valid": (torch.rand(2, 1, 512, 512) > 0.8).float(),
         "direction_field": torch.randn(2, 2, 512, 512)
     }
     
