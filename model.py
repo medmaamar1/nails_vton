@@ -113,7 +113,6 @@ class NailVTONModel(nn.Module):
         # Laplacian Pyramid heads
         self.head_l0 = PyramidHeads(FUSE)
         self.head_l1 = PyramidHeads(FUSE)
-        self.head_final = PyramidHeads(FUSE)
 
     def forward(self, x):
         with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled()):
@@ -123,18 +122,20 @@ class NailVTONModel(nn.Module):
             feat_high = self.encoder_high(x)
             feat_low_s4, feat_low_s8 = self.encoder_low(x_half)
 
-        # 1. Low-Resolution Fusion (Level 0 side-output)
-        # Matches Section 3.2: "fuses H/16 x W/16 features from stage_low4 with upsampled stage_low8"
+        # 1. Low-Resolution Base (Level 0 side-output)
         f0 = self.fusion_low(feat_low_s8, feat_low_s4)
         out0_bin, out0_dir = self.head_l0(f0)
 
-        # 2. High-Resolution Fusion (Level 1 side-output)
-        # Matches Section 3.2: "fuses resulting features with H/8 x W/8 features from stage_high4"
+        # 2. High-Resolution Residuals (Level 1 side-output)
         f1 = self.fusion_high(f0, feat_high)
-        out1_bin, out1_dir = self.head_l1(f1)
+        res1_bin, res1_dir = self.head_l1(f1)
 
-        # 3. Final Output (Upsampled to full resolution)
-        out2_bin, out2_dir = self.head_final(f1)
+        # Laplacian Addition: Upsample L0 predictions and ADD the high-res residuals
+        out0_bin_up = F.interpolate(out0_bin, size=res1_bin.shape[-2:], mode="bilinear", align_corners=False)
+        out0_dir_up = F.interpolate(out0_dir, size=res1_dir.shape[-2:], mode="bilinear", align_corners=False)
+        
+        out1_bin = out0_bin_up + res1_bin
+        out1_dir = out0_dir_up + res1_dir
         
         def _norm_dir(d):
             return d / d.norm(dim=1, keepdim=True).clamp(min=1e-6)
@@ -142,9 +143,10 @@ class NailVTONModel(nn.Module):
         p0 = (out0_bin, _norm_dir(out0_dir))
         p1 = (out1_bin, _norm_dir(out1_dir))
         
-        final_bin = F.interpolate(out2_bin, size=(self.image_size, self.image_size),
+        # 3. Final Output (Upsampled to full resolution)
+        final_bin = F.interpolate(out1_bin, size=(self.image_size, self.image_size),
                                   mode="bilinear", align_corners=False)
-        final_dir = F.interpolate(out2_dir, size=(self.image_size, self.image_size),
+        final_dir = F.interpolate(out1_dir, size=(self.image_size, self.image_size),
                                   mode="bilinear", align_corners=False)
         pf = (final_bin, _norm_dir(final_dir))
 

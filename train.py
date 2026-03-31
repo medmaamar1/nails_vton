@@ -103,6 +103,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         
         total_loss     += current_loss
         total_bin_iou  += bin_iou
+        total_dir_loss += loss_dict.get('l2_dir', 0.0)
 
         if (i + 1) % 50 == 0:
             mem = psutil.virtual_memory().used / (1024**3)
