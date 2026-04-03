@@ -96,6 +96,8 @@ class NailVTONLoss(nn.Module):
         multi_predictions: list of tuples (binary, direction)
         """
         total_loss = 0.0
+        sum_bin    = 0.0
+        sum_dir    = 0.0
         details = {}
 
         for i, preds in enumerate(multi_predictions):
@@ -111,12 +113,16 @@ class NailVTONLoss(nn.Module):
             
             l_lvl = (self.w_bin * l_bin) + (self.w_dir * l_dir)
             total_loss += l_lvl
+            sum_bin    += l_bin.item()
+            sum_dir    += l_dir.item()
             
             details[f"l{i}_total"] = l_lvl.item()
             details[f"l{i}_bin"]   = l_bin.item()
             details[f"l{i}_dir"]   = l_dir.item()
 
-        details["loss_total"] = total_loss.item()
+        details["loss_total"]     = total_loss.item()
+        details["loss_binary"]    = sum_bin
+        details["loss_direction"] = sum_dir
         return total_loss, details
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
