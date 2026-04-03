@@ -5,8 +5,17 @@ Loads Roboflow v50 COCO Segmentation JSON.
 Produces per-image:
   1. image           : (3, H, W)       float32 normalised
   2. binary_mask     : (1, H, W)       float32  — union of all nail masks
-  3. direction_field : (2, H, W)       float32  — unit vector base→tip per nail pixel
-  4. n_instances     : scalar          int64
+  3. instance_masks  : (10, H, W)      float32  — one-hot, channel i = nail i
+  4. direction_field : (2, H, W)       float32  — unit vector base→tip per nail pixel
+  5. finger_ids      : (10,)           int64    — finger label per slot (0=unused,
+                                                  1=thumb, 2=index, 3=middle,
+                                                  4=ring, 5=pinky)
+  6. n_instances     : scalar          int64
+
+Finger identity is derived geometrically — no extra annotation needed:
+  • Thumb  → largest bbox area AND y-centroid is an outlier (below the finger row)
+  • Fingers 2-5 → sorted by x-centroid: leftmost=pinky … rightmost=index
+    (works for either hand; label assignment is position-relative)
 """
 
 import json
@@ -22,9 +31,18 @@ import torchvision.transforms.functional as TF
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-IMAGE_SIZE    = 448
+MAX_INSTANCES = 10
+IMAGE_SIZE    = 512
 MEAN          = [0.485, 0.456, 0.406]
 STD           = [0.229, 0.224, 0.225]
+
+# Finger label codes
+FINGER_UNUSED = 0
+FINGER_THUMB  = 1
+FINGER_INDEX  = 2
+FINGER_MIDDLE = 3
+FINGER_RING   = 4
+FINGER_PINKY  = 5
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -38,161 +56,172 @@ def polygon_to_mask(polygon, height, width):
     return mask
 
 
+def assign_finger_ids(bboxes):
+    """
+    Given a list of bboxes [[x,y,w,h], ...] for one image, return a list of
+    finger label codes of the same length.
+
+    Algorithm:
+      1. Compute centroid (cx, cy) and area for each nail.
+      2. Identify thumb: largest area AND cy > median_cy of all nails.
+         If no nail satisfies both, fall back to largest area alone.
+      3. Sort remaining nails by cx (left → right).
+         Assign labels left-to-right: pinky(5) → ring(4) → middle(3) → index(2).
+         If fewer than 4 remain, assign from pinky inward.
+    """
+    n = len(bboxes)
+    if n == 0:
+        return []
+
+    cx_list = [x + w / 2.0 for x, y, w, h in bboxes]
+    cy_list = [y + h / 2.0 for x, y, w, h in bboxes]
+    area_list = [w * h for x, y, w, h in bboxes]
+
+    median_cy = sorted(cy_list)[len(cy_list) // 2]
+
+    # Find thumb index
+    thumb_idx = None
+    best_area = -1
+    for i, (area, cy) in enumerate(zip(area_list, cy_list)):
+        if cy > median_cy and area > best_area:
+            best_area = area
+            thumb_idx = i
+    if thumb_idx is None:                          # fallback: just largest
+        thumb_idx = int(np.argmax(area_list))
+
+    # Remaining nails sorted by cx
+    remaining = [(i, cx_list[i]) for i in range(n) if i != thumb_idx]
+    remaining.sort(key=lambda t: t[1])             # left → right
+
+    # Label map: position 0=leftmost → pinky, last=rightmost → index
+    pos_to_label = [FINGER_PINKY, FINGER_RING, FINGER_MIDDLE, FINGER_INDEX]
+
+    labels = [FINGER_UNUSED] * n
+    labels[thumb_idx] = FINGER_THUMB
+    for pos, (orig_idx, _) in enumerate(remaining):
+        if pos < len(pos_to_label):
+            labels[orig_idx] = pos_to_label[pos]
+        else:
+            labels[orig_idx] = FINGER_UNUSED       # >4 non-thumb nails (rare)
+
+    return labels
+
 
 def compute_direction_field(mask_np, bbox):
     """
-    Single-nail direction field: each foreground pixel gets a unit vector
-    pointing from the nail base to the nail tip.
+    Computes anatomical direction (base -> tip) using Principal Component Analysis.
+    This ensures the target follows the actual finger orientation, regardless of hand rotation.
     
-    Strict Paper Parity: 
-    - We compute the Principal Axis of the nail mask.
-    - We flip the sign so it points away from the palm (towards bbox top).
-    - We ensure magnitude = 1.0 (Section 3.3).
+    Returns (2, H, W) unit vectors.
     """
-    coords = np.argwhere(mask_np > 127)
-    if len(coords) < 10:
-        return np.zeros((2, mask_np.shape[0], mask_np.shape[1]), dtype=np.float32)
-
-    # PCA to find the primary axis (elongation)
-    mean = coords.mean(axis=0)
-    diff = coords - mean
-    cov  = np.dot(diff.T, diff)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    
-    # The largest eigenvalue (index 1) corresponds to the nail's length axis
-    vy, vx = eigvecs[:, 1]
-    
-    # Orient the vector so it points "upward" in the bounding box coordinate frame
-    # (i.e. towards the top of the nail relative to the centroid)
-    # We compare with the vector from centroid to the top-middle of the bbox
-    if vy > 0: # In image coords, +Y is DOWN. vy > 0 means pointing DOWN.
-        vy, vx = -vy, -vx
-
-    # Final Unit Normalization
-    norm = np.sqrt(vx**2 + vy**2) + 1e-8
-    vx, vy = vx/norm, vy/norm
-
     H, W = mask_np.shape
+    coords = np.argwhere(mask_np > 127) # (N, 2) where col 0 is Y, col 1 is X
+    
+    if len(coords) < 10:
+        return np.zeros((2, H, W), dtype=np.float32)
+
+    # 1. PCA: Find principal axis of the pixel cloud
+    coords = coords.astype(np.float32)
+    mean = coords.mean(axis=0)
+    centered = coords - mean
+    cov = np.dot(centered.T, centered)
+    eig_vals, eig_vecs = np.linalg.eigh(cov)
+    
+    # The principal axis (longest spread) is the eigenvector with the largest eigenvalue
+    # For a (2,2) matrix, eig_vals are sorted ascending, so index 1 is the major axis
+    direction = eig_vecs[:, 1] # [dy, dx]
+    
+    # 2. Canonical Orientation: Ensure vector points base -> tip
+    # clav: we align it with the bounding box 'upwards' clue.
+    # If dy is positive, it's pointing 'down' in image space. 
+    # Usually tip is 'above' base (negative dy).
+    if direction[0] > 0:
+        direction = -direction
+
+    dy, dx = direction
+    norm = math.sqrt(dx*dx + dy*dy) + 1e-8
+    ux, uy = dx/norm, dy/norm
+
     fg = (mask_np > 127).astype(np.float32)
-    return np.stack([fg * vx, fg * vy], axis=0)  # (2, H, W)
+    return np.stack([fg * ux, fg * uy], axis=0)
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
 
 class NailDataset(Dataset):
-    def __init__(self, root, augment=False, image_size=IMAGE_SIZE, json_path=None):
+    def __init__(self, root, augment=False, image_size=IMAGE_SIZE):
         self.root       = Path(root)
         self.augment    = augment
         self.image_size = image_size
 
-        if json_path is not None:
-            ann_path = Path(json_path)
-            print(f"[NailDataset] Using custom JSON path: {ann_path}")
-        else:
-            ann_path = self.root / "_annotations.coco.json"
-            
-        with open(ann_path, "r", encoding='utf-8') as f:
+        ann_path = self.root / "_annotations.coco.json"
+        with open(ann_path, "r") as f:
             coco = json.load(f)
 
-        # Pre-resolve image paths by scanning the directory (recursive).
-        # This workaround handles Roboflow long filenames that may be truncated 
-        # on certain filesystems (Kaggle/Linux) causing OSError: [Errno 36].
-        print(f"[NailDataset] Mapping files in {self.root}...")
-        all_files = list(self.root.rglob("*.jpg")) + list(self.root.rglob("*.png"))
-        
-        # Maps for quick lookup: hash -> Path, and name -> Path
-        hash_to_path = {}
-        name_to_path = {}
-        for p in all_files:
-            name_to_path[p.name] = p
-            if ".rf." in p.name:
-                h = p.name.split(".rf.")[-1].split(".")[0]
-                hash_to_path[h] = p
+        self.id_to_file = {img["id"]: img["file_name"] for img in coco["images"]}
 
         self.id_to_anns = {}
         for ann in coco["annotations"]:
-            aid = ann["image_id"]
-            self.id_to_anns.setdefault(aid, [])
-            self.id_to_anns[aid].append(ann)
+            iid = ann["image_id"]
+            self.id_to_anns.setdefault(iid, [])
+            self.id_to_anns[iid].append(ann)
 
-        self.image_ids  = []
-        self.id_to_path = {}
+        self.image_ids = [
+            iid for iid in self.id_to_file
+            if iid in self.id_to_anns and len(self.id_to_anns[iid]) > 0
+        ]
 
-        for img in coco["images"]:
-            iid = img["id"]
-            # Skip if no annotations
-            if iid not in self.id_to_anns or not self.id_to_anns[iid]:
-                continue
-
-            fname = img["file_name"]
-            rf_hash = fname.split(".rf.")[-1].split(".")[0] if ".rf." in fname else None
-            
-            # Attempt to find the file using: hash -> direct name -> fallback images subfolder
-            target_path = None
-            if rf_hash and rf_hash in hash_to_path:
-                target_path = hash_to_path[rf_hash]
-            elif fname in name_to_path:
-                target_path = name_to_path[fname]
-            else:
-                # Final check (handles cases where rglob might have missed it or path is weird)
-                try:
-                    p1 = self.root / fname
-                    p2 = self.root / "images" / fname
-                    if p1.exists(): target_path = p1
-                    elif p2.exists(): target_path = p2
-                except OSError: # Still too long? Skip it.
-                    pass
-
-            if target_path:
-                self.id_to_path[iid] = target_path
-                self.image_ids.append(iid)
-
-        print(f"[NailDataset] Loaded {len(self.image_ids)} valid images (root={root}, augment={augment})")
-
-        # Free memory (JSON and file list can be large)
-        if 'coco' in locals(): del coco
-        if 'all_files' in locals(): del all_files
-        if 'hash_to_path' in locals(): del hash_to_path
-        if 'name_to_path' in locals(): del name_to_path
+        print(f"[NailDataset] {len(self.image_ids)} images  "
+              f"(root={root}, augment={augment})")
 
     def __len__(self):
         return len(self.image_ids)
 
     def __getitem__(self, idx):
         image_id  = self.image_ids[idx]
-        img_path  = self.id_to_path[image_id]
+        file_name = self.id_to_file[image_id]
         anns      = self.id_to_anns[image_id]
 
         # ── Load image ────────────────────────────────────────────────────────
-        image_orig     = Image.open(img_path).convert("RGB")
-        orig_w, orig_h = image_orig.size
+        # Images may live directly in root or inside root/images
+        img_path = self.root / file_name
+        if not img_path.exists():
+            img_path = self.root / "images" / file_name
+        image          = Image.open(img_path).convert("RGB")
+        orig_w, orig_h = image.size
 
         # ── Build per-nail masks at original resolution ───────────────────────
         masks_pil   = []
         bboxes_orig = []
-        for ann in anns:
+
+        for ann in anns[:MAX_INSTANCES]:
             seg = ann.get("segmentation", [])
             if not seg or len(seg[0]) < 6:
                 continue
             masks_pil.append(polygon_to_mask(seg[0], orig_h, orig_w))
             bboxes_orig.append(ann["bbox"])
 
+        # ── Topological Instance Sorting ──────────────────────────────────────
+        # Sort nails left-to-right to assign stable IDs regardless of JSON order.
+        combined = list(zip(masks_pil, bboxes_orig))
+        combined.sort(key=lambda x: x[1][0]) # Sort by X-bounding box
+        
+        masks_pil   = [c[0] for c in combined]
+        bboxes_orig = [c[1] for c in combined]
+        finger_labels = [FINGER_UNUSED] * len(bboxes_orig)
+
         # ── Resize to image_size ──────────────────────────────────────────────
         sx = self.image_size / orig_w
         sy = self.image_size / orig_h
-        image = image_orig.resize((self.image_size, self.image_size), Image.BILINEAR)
-        image_orig.close()
+        image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
 
         masks_resized  = []
         bboxes_resized = []
         for m, (x, y, w, h) in zip(masks_pil, bboxes_orig):
-            m_resized = m.resize((self.image_size, self.image_size), Image.NEAREST)
-            masks_resized.append(m_resized)
+            masks_resized.append(
+                m.resize((self.image_size, self.image_size), Image.NEAREST)
+            )
             bboxes_resized.append([x * sx, y * sy, w * sx, h * sy])
-            # Explicitly close and delete original PIL image to save RAM
-            m.close()
-
-        del masks_pil
 
         # ── Augmentation ──────────────────────────────────────────────────────
         if self.augment:
@@ -207,8 +236,13 @@ class NailDataset(Dataset):
         binary_np = np.zeros((S, S), dtype=np.float32)
         for m in masks_resized:
             binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
-        binary_t = torch.from_numpy(binary_np).clone().unsqueeze(0)   # (1, H, W)
+        binary_t = torch.from_numpy(binary_np).unsqueeze(0)   # (1, H, W)
 
+        # ── Instance masks — one-hot (10, H, W) ──────────────────────────────
+        inst_np = np.zeros((MAX_INSTANCES, S, S), dtype=np.float32)
+        for i, m in enumerate(masks_resized):
+            inst_np[i] = np.array(m, dtype=np.float32) / 255.0
+        inst_t = torch.from_numpy(inst_np)                     # (10, H, W)
 
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
@@ -221,17 +255,19 @@ class NailDataset(Dataset):
         valid = norm > 1e-6
         dir_np[0, valid] /= norm[valid]
         dir_np[1, valid] /= norm[valid]
-        dir_t = torch.from_numpy(dir_np).clone()                       # (2, H, W)
+        dir_t = torch.from_numpy(dir_np)                       # (2, H, W)
 
-        # Cleanup explicitly to prevent multiprocess IPC leaks
-        image.close()
-        for m in masks_resized:
-            m.close()
+        # ── Finger id tensor (10,) — 0 for unused slots ───────────────────────
+        finger_t = torch.zeros(MAX_INSTANCES, dtype=torch.long)
+        for i, lbl in enumerate(finger_labels):
+            finger_t[i] = lbl
 
         return {
             "image"          : img_t,                          # (3,  H, W)
             "binary_mask"    : binary_t,                       # (1,  H, W)
+            "instance_masks" : inst_t,                         # (10, H, W)
             "direction_field": dir_t,                          # (2,  H, W)
+            "finger_ids"     : finger_t,                       # (10,)
             "n_instances"    : torch.tensor(len(masks_resized), dtype=torch.long),
             "image_id"       : image_id,
         }
@@ -239,30 +275,22 @@ class NailDataset(Dataset):
     # ── Augmentation ──────────────────────────────────────────────────────────
 
     def _augment(self, image, masks):
-        def _apply_img_aug(img_in, fn, *args):
-            img_out = fn(img_in, *args)
-            if hasattr(img_in, "close") and img_in is not img_out:
-                img_in.close()
-            return img_out
-
         if random.random() > 0.5:
-            image = _apply_img_aug(image, TF.hflip)
-            masks = [_apply_img_aug(m, TF.hflip) for m in masks]
+            image = TF.hflip(image)
+            masks = [TF.hflip(m) for m in masks]
         if random.random() > 0.5:
-            image = _apply_img_aug(image, TF.vflip)
-            masks = [_apply_img_aug(m, TF.vflip) for m in masks]
-            
-        image = _apply_img_aug(image, TF.adjust_brightness, 1 + random.uniform(-0.2,  0.2))
-        image = _apply_img_aug(image, TF.adjust_contrast,   1 + random.uniform(-0.2,  0.2))
-        image = _apply_img_aug(image, TF.adjust_saturation, 1 + random.uniform(-0.3,  0.3))
-        image = _apply_img_aug(image, TF.adjust_hue,            random.uniform(-0.05, 0.05))
-        
+            image = TF.vflip(image)
+            masks = [TF.vflip(m) for m in masks]
+        image = TF.adjust_brightness(image, 1 + random.uniform(-0.2,  0.2))
+        image = TF.adjust_contrast(image,   1 + random.uniform(-0.2,  0.2))
+        image = TF.adjust_saturation(image, 1 + random.uniform(-0.3,  0.3))
+        image = TF.adjust_hue(image,            random.uniform(-0.05, 0.05))
         return image, masks
 
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
 
-def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_path=None):
+def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
     root = Path(dataset_root)
     
     # If standard 'train' subfolder exists, use it; otherwise use the root itself.
@@ -270,35 +298,24 @@ def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_
     train_root = root / "train" if (root / "train").exists() else root
     valid_root = root / "valid"
 
-    train_ds = NailDataset(train_root, augment=True, json_path=json_path)
+    train_ds = NailDataset(train_root, augment=True)
 
     if valid_root.exists():
-        # Typically valid subfolder has its own JSON, but we'll pass the custom one if they are explicitly bypassing the defaults
-        val_ds = NailDataset(valid_root, augment=False, json_path=json_path)
+        val_ds = NailDataset(valid_root, augment=False)
     else:
-        import copy
         n_val   = int(len(train_ds) * val_split)
         n_train = len(train_ds) - n_val
-        
-        train_subset, val_subset = torch.utils.data.random_split(
+        train_ds, val_ds = torch.utils.data.random_split(
             train_ds, [n_train, n_val],
             generator=torch.Generator().manual_seed(42)
         )
-        
-        # Validation shouldn't be augmented (keeps loss metrics stable)
-        base_val_ds = copy.deepcopy(train_ds)
-        base_val_ds.augment = False
-        
-        train_ds = train_subset
-        val_ds   = torch.utils.data.Subset(base_val_ds, val_subset.indices)
-        
-        print(f"[make_loaders] Auto-split → train={n_train}, val={n_val} (Golden 'No-Aug' Validation)")
+        print(f"[make_loaders] Auto-split → train={n_train}, val={n_val}")
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=False,
+                              num_workers=num_workers, pin_memory=True,
                               drop_last=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=False)
+                              num_workers=num_workers, pin_memory=True)
     return train_loader, val_loader
 
 
@@ -312,7 +329,9 @@ if __name__ == "__main__":
 
     print("image          :", sample["image"].shape,           sample["image"].dtype)
     print("binary_mask    :", sample["binary_mask"].shape,     sample["binary_mask"].max().item())
+    print("instance_masks :", sample["instance_masks"].shape,  sample["instance_masks"].sum().item(), "fg pixels")
     print("direction_field:", sample["direction_field"].shape, sample["direction_field"].abs().max().item())
+    print("finger_ids     :", sample["finger_ids"].tolist())
     print("n_instances    :", sample["n_instances"].item())
     print("image_id       :", sample["image_id"])
     print("\nDataset sanity check PASSED ✓")

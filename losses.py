@@ -19,14 +19,14 @@ class LMPLoss(nn.Module):
         self.keep_ratio = keep_ratio
 
     def forward(self, logits, targets):
-        """logits, targets: (B, 1, H, W)"""
+        """logits, targets: (B, 1, H, W) or (B, C, H, W)"""
         loss_map  = F.binary_cross_entropy_with_logits(
             logits, targets, reduction="none"
         )
-        B         = loss_map.shape[0]
-        loss_flat = loss_map.view(B, -1)
-        k         = max(1, int(loss_flat.size(1) * self.keep_ratio))
-        top_k, _  = loss_flat.topk(k, dim=1)
+        # Global LMP: Flatten ALL pixels in the minibatch
+        loss_flat = loss_map.view(-1)
+        k         = max(1, int(loss_flat.size(0) * self.keep_ratio))
+        top_k, _  = loss_flat.topk(k)
         return top_k.mean()
 
 
