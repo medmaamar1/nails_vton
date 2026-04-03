@@ -174,6 +174,16 @@ class NailDataset(Dataset):
         print(f"[NailDataset] {len(self.image_ids)} images  "
               f"(root={root}, augment={augment})")
 
+        # Open file descriptors for directory-relative opening (bypasses long path limits)
+        try:
+            self.root_fd = os.open(str(self.root), os.O_RDONLY)
+        except:
+            self.root_fd = None
+        try:
+            self.img_fd = os.open(str(self.root / "images"), os.O_RDONLY)
+        except:
+            self.img_fd = None
+
     def __len__(self):
         return len(self.image_ids)
 
@@ -183,18 +193,23 @@ class NailDataset(Dataset):
         anns      = self.id_to_anns[image_id]
 
         # ── Load image ────────────────────────────────────────────────────────
-        # Images may live directly in root or inside root/images
-        try:
-            # Try direct root find first
-            image = Image.open(str(self.root / file_name)).convert("RGB")
-        except:
+        # Using dir_fd bypasses the OS's full-path string length limit (255 chars)
+        image = None
+        for fd in [self.root_fd, self.img_fd]:
+            if fd is None: continue
             try:
-                # Fallback to images/ subfolder
-                image = Image.open(str(self.root / "images" / file_name)).convert("RGB")
-            except Exception as e:
-                # Critical fallback (black image) so training doesn't hard-crash
-                print(f"[NailDataset] FAILED to open {file_name[:50]}... Error: {e}")
-                image = Image.new("RGB", (self.image_size, self.image_size), (0, 0, 0))
+                # Open just the filename relative to the directory descriptor
+                f_handle = os.open(file_name, os.O_RDONLY, dir_fd=fd)
+                with os.fdopen(f_handle, 'rb') as f:
+                    image = Image.open(f).convert("RGB")
+                break # Success!
+            except:
+                continue
+
+        if image is None:
+            # Absolute last resort fallback
+            print(f"[NailDataset] CRITICAL: Could not open {file_name[:50]}... even via dir_fd.")
+            image = Image.new("RGB", (self.image_size, self.image_size), (0, 0, 0))
         orig_w, orig_h = image.size
 
         # ── Build per-nail masks at original resolution ───────────────────────
