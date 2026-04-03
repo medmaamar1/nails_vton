@@ -184,10 +184,17 @@ class NailDataset(Dataset):
 
         # ── Load image ────────────────────────────────────────────────────────
         # Images may live directly in root or inside root/images
-        img_path = self.root / file_name
-        if not img_path.exists():
-            img_path = self.root / "images" / file_name
-        image          = Image.open(img_path).convert("RGB")
+        try:
+            # Try direct root find first
+            image = Image.open(str(self.root / file_name)).convert("RGB")
+        except:
+            try:
+                # Fallback to images/ subfolder
+                image = Image.open(str(self.root / "images" / file_name)).convert("RGB")
+            except Exception as e:
+                # Critical fallback (black image) so training doesn't hard-crash
+                print(f"[NailDataset] FAILED to open {file_name[:50]}... Error: {e}")
+                image = Image.new("RGB", (self.image_size, self.image_size), (0, 0, 0))
         orig_w, orig_h = image.size
 
         # ── Build per-nail masks at original resolution ───────────────────────
