@@ -22,16 +22,14 @@ from torch.amp import GradScaler, autocast
 sys.path.insert(0, str(Path(__file__).parent))
 from dataset import make_loaders
 from model   import NailVTONModel
-from losses  import NailVTONLoss, compute_iou
+from losses  import NailVTONLoss, compute_iou, compute_instance_iou
 
 
 # ── Args ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
-    p.add_argument("--data_root",   default="/kaggle/input/datasets/almohamed132/nails-vton/train")
-    p.add_argument("--mp_json",     default="/kaggle/input/datasets/almohamed132/nails-orientation/mp_orientations_v1.json",
-                   help="Path to the MediaPipe skeletal orientation cache")
+    p.add_argument("--data_root",   default="/kaggle/input/datasets/maamarmohamed12/nails-vton/train")
     p.add_argument("--epochs",      type=int,   default=100)
     p.add_argument("--batch_size",  type=int,   default=16)
     p.add_argument("--lr",          type=float, default=2e-3)
@@ -43,8 +41,8 @@ def parse_args():
     p.add_argument("--warmup_epochs", type=int, default=5,
                    help="Linear LR warmup before cosine decay kicks in")
     p.add_argument("--w_binary",    type=float, default=1.0)
+    p.add_argument("--w_instance",  type=float, default=1.0)
     p.add_argument("--w_direction", type=float, default=0.5)
-    p.add_argument("--lmp_ratio",   type=float, default=0.1)
     return p.parse_args()
 
 
@@ -65,12 +63,14 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
     model.train()
     total_loss     = 0.0
     total_bin_iou  = 0.0
+    total_inst_iou = 0.0
     n_batches      = len(loader)
 
     for i, batch in enumerate(loader):
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
+            "instance_masks" : batch["instance_masks"].to(device,  non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
 
@@ -91,19 +91,23 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-        bin_iou  = compute_iou(preds[-1][0].detach(), targets["binary_mask"])
+        bin_iou  = compute_iou(preds[0].detach(), targets["binary_mask"])
+        inst_iou = compute_instance_iou(preds[1].detach(), targets["instance_masks"])
         total_loss     += loss_dict["loss_total"]
         total_bin_iou  += bin_iou
+        total_inst_iou += inst_iou
 
         if (i + 1) % 50 == 0:
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={loss_dict['loss_total']:.4f}  "
-                  f"bin={loss_dict['l0_bin']:.4f}  "
-                  f"dir={loss_dict['l0_dir']:.4f}  "
-                  f"bin_iou={bin_iou:.4f}")
+                  f"bin={loss_dict['loss_binary']:.4f}  "
+                  f"inst={loss_dict['loss_instance']:.4f}  "
+                  f"dir={loss_dict['loss_direction']:.4f}  "
+                  f"bin_iou={bin_iou:.4f}  inst_iou={inst_iou:.4f}")
 
     return (total_loss     / n_batches,
-            total_bin_iou  / n_batches)
+            total_bin_iou  / n_batches,
+            total_inst_iou / n_batches)
 
 
 @torch.no_grad()
@@ -111,12 +115,14 @@ def validate(model, loader, criterion, device, use_amp):
     model.eval()
     total_loss     = 0.0
     total_bin_iou  = 0.0
+    total_inst_iou = 0.0
     n_batches      = len(loader)
 
     for batch in loader:
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
+            "instance_masks" : batch["instance_masks"].to(device,  non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
 
@@ -125,10 +131,12 @@ def validate(model, loader, criterion, device, use_amp):
             _, loss_dict = criterion(preds, targets)
 
         total_loss     += loss_dict["loss_total"]
-        total_bin_iou  += compute_iou(preds[-1][0], targets["binary_mask"])
+        total_bin_iou  += compute_iou(preds[0], targets["binary_mask"])
+        total_inst_iou += compute_instance_iou(preds[1], targets["instance_masks"])
 
     return (total_loss     / n_batches,
-            total_bin_iou  / n_batches)
+            total_bin_iou  / n_batches,
+            total_inst_iou / n_batches)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -140,15 +148,14 @@ def main():
     use_amp = not args.no_amp and device.type == "cuda"
     print(f"Device: {device}  |  AMP: {use_amp}")
 
-    # ──    # 1. Loaders
-    print(f"[*] Loading data from {args.data_root}...")
+    # ── Data ───────────────────────────────────────────────────────────────────
     train_loader, val_loader = make_loaders(
-        args.data_root, 
-        args.mp_json,
-        batch_size=args.batch_size, 
-        num_workers=args.num_workers,
-        image_size=args.image_size
-    )# ── Model ──────────────────────────────────────────────────────────────────
+        args.data_root,
+        batch_size  = args.batch_size,
+        num_workers = args.num_workers,
+    )
+
+    # ── Model ──────────────────────────────────────────────────────────────────
     model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
     
     # Enable DataParallel for Kaggle 2x GPUs
@@ -159,13 +166,17 @@ def main():
     model.module.count_parameters() if isinstance(model, torch.nn.DataParallel) else model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
-    criterion = NailVTONLoss(lmp_ratio=args.lmp_ratio)
+    criterion = NailVTONLoss(
+        w_binary    = args.w_binary,
+        w_instance  = args.w_instance,
+        w_direction = args.w_direction,
+    )
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
     # Encoder (pretrained) gets 10× lower LR than decoder (random init)
     base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     
-    encoder_params = list(base_model.encoder_low.parameters()) + list(base_model.encoder_high.parameters())
+    encoder_params = list(base_model.encoder.parameters())
     encoder_ids    = {id(p) for p in encoder_params}
     decoder_params = [p for p in model.parameters() if id(p) not in encoder_ids]
 
@@ -227,27 +238,31 @@ def main():
         print(f"Epoch {epoch+1}/{args.epochs}  "
               f"LR=[enc={current_lrs[0]}, dec={current_lrs[1]}]")
 
-        train_loss, train_bin_iou = train_one_epoch(
+        train_loss, train_bin_iou, train_inst_iou = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, device, use_amp
         )
-        val_loss, val_bin_iou = validate(
+        val_loss, val_bin_iou, val_inst_iou = validate(
             model, val_loader, criterion, device, use_amp
         )
 
         elapsed = time.time() - t0
         print(f"Epoch {epoch+1} — {elapsed:.0f}s | "
               f"train loss={train_loss:.4f}  "
-              f"bin_iou={train_bin_iou:.4f} | "
+              f"bin_iou={train_bin_iou:.4f}  "
+              f"inst_iou={train_inst_iou:.4f} | "
               f"val loss={val_loss:.4f}  "
-              f"val_bin_iou={val_bin_iou:.4f}")
+              f"val_bin_iou={val_bin_iou:.4f}  "
+              f"val_inst_iou={val_inst_iou:.4f}")
 
         # ── Checkpointing ──────────────────────────────────────────────────────
         record = {
             "epoch"          : epoch,
             "train_loss"     : train_loss,
             "train_bin_iou"  : train_bin_iou,
+            "train_inst_iou" : train_inst_iou,
             "val_loss"       : val_loss,
             "val_bin_iou"    : val_bin_iou,
+            "val_inst_iou"   : val_inst_iou,
         }
         history.append(record)
 

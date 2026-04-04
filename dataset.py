@@ -56,25 +56,93 @@ def polygon_to_mask(polygon, height, width):
     return mask
 
 
+def assign_finger_ids(bboxes):
+    """
+    Given a list of bboxes [[x,y,w,h], ...] for one image, return a list of
+    finger label codes of the same length.
 
+    Algorithm:
+      1. Compute centroid (cx, cy) and area for each nail.
+      2. Identify thumb: largest area AND cy > median_cy of all nails.
+         If no nail satisfies both, fall back to largest area alone.
+      3. Sort remaining nails by cx (left → right).
+         Assign labels left-to-right: pinky(5) → ring(4) → middle(3) → index(2).
+         If fewer than 4 remain, assign from pinky inward.
+    """
+    n = len(bboxes)
+    if n == 0:
+        return []
+
+    cx_list = [x + w / 2.0 for x, y, w, h in bboxes]
+    cy_list = [y + h / 2.0 for x, y, w, h in bboxes]
+    area_list = [w * h for x, y, w, h in bboxes]
+
+    median_cy = sorted(cy_list)[len(cy_list) // 2]
+
+    # Find thumb index
+    thumb_idx = None
+    best_area = -1
+    for i, (area, cy) in enumerate(zip(area_list, cy_list)):
+        if cy > median_cy and area > best_area:
+            best_area = area
+            thumb_idx = i
+    if thumb_idx is None:                          # fallback: just largest
+        thumb_idx = int(np.argmax(area_list))
+
+    # Remaining nails sorted by cx
+    remaining = [(i, cx_list[i]) for i in range(n) if i != thumb_idx]
+    remaining.sort(key=lambda t: t[1])             # left → right
+
+    # Label map: position 0=leftmost → pinky, last=rightmost → index
+    pos_to_label = [FINGER_PINKY, FINGER_RING, FINGER_MIDDLE, FINGER_INDEX]
+
+    labels = [FINGER_UNUSED] * n
+    labels[thumb_idx] = FINGER_THUMB
+    for pos, (orig_idx, _) in enumerate(remaining):
+        if pos < len(pos_to_label):
+            labels[orig_idx] = pos_to_label[pos]
+        else:
+            labels[orig_idx] = FINGER_UNUSED       # >4 non-thumb nails (rare)
+
+    return labels
+
+
+def compute_direction_field(mask_np, bbox):
+    """
+    Single-nail direction field: each foreground pixel gets a unit vector
+    pointing from bbox bottom-centre (base) to bbox top-centre (tip).
+
+    Returns (2, H, W) float32.  All-zero outside the mask.
+    """
+    H, W = mask_np.shape
+    x, y, w, h = bbox
+
+    vx = 0.0                        # tip and base share the same x-centre
+    vy = -(h)                       # tip is above base → negative y direction
+
+    norm = math.sqrt(vx * vx + vy * vy)
+    if norm < 1e-6:
+        return np.zeros((2, H, W), dtype=np.float32)
+
+    ux, uy = vx / norm, vy / norm   # unit vector (always (0, -1) for vertical nails)
+
+    fg = (mask_np > 127).astype(np.float32)
+    dx = fg * ux
+    dy = fg * uy
+    return np.stack([dx, dy], axis=0)              # (2, H, W)
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
 
 class NailDataset(Dataset):
-    def __init__(self, root, mp_json_path, augment=False, image_size=IMAGE_SIZE):
+    def __init__(self, root, augment=False, image_size=IMAGE_SIZE):
         self.root       = Path(root)
         self.augment    = augment
         self.image_size = image_size
 
-        # 1. Load standard COCO annotations
         ann_path = self.root / "_annotations.coco.json"
         with open(ann_path, "r") as f:
             coco = json.load(f)
-
-        # 2. Load MediaPipe Orientation Cache
-        with open(mp_json_path, "r") as f:
-            self.mp_data = json.load(f)
 
         self.id_to_file = {img["id"]: img["file_name"] for img in coco["images"]}
 
@@ -84,18 +152,12 @@ class NailDataset(Dataset):
             self.id_to_anns.setdefault(iid, [])
             self.id_to_anns[iid].append(ann)
 
-        # Filter image_ids: Only include those with verified MediaPipe skeletal data
         self.image_ids = [
             iid for iid in self.id_to_file
-            if str(iid) in self.mp_data and len(self.id_to_anns.get(iid, [])) > 0
+            if iid in self.id_to_anns and len(self.id_to_anns[iid]) > 0
         ]
 
-        # RAM Optimization: Prune the dictionary to only keep filtered IDs.
-        # This prevents DataLoader workers from carrying the entire raw dataset JSON in memory.
-        valid_str_ids = {str(iid) for iid in self.image_ids}
-        self.mp_data = {k: v for k, v in self.mp_data.items() if k in valid_str_ids}
-
-        print(f"[NailDataset] Filtered to {len(self.image_ids)} verified images  "
+        print(f"[NailDataset] {len(self.image_ids)} images  "
               f"(root={root}, augment={augment})")
 
     def __len__(self):
@@ -166,24 +228,22 @@ class NailDataset(Dataset):
         inst_t = torch.from_numpy(inst_np)                     # (10, H, W)
 
         # ── Direction field ───────────────────────────────────────────────────
-        # Using pre-computed skeletal anatomical directions (DIP -> TIP)
-        img_mp_vectors = self.mp_data.get(str(image_id), {})
         dir_np = np.zeros((2, S, S), dtype=np.float32)
+        for m, bbox in zip(masks_resized, bboxes_resized):
+            mask_np = np.array(m, dtype=np.uint8)
+            dir_np += compute_direction_field(mask_np, bbox)
 
-        for i, m in enumerate(masks_resized):
-            ann_id = str(anns[i]["id"])
-            if ann_id in img_mp_vectors:
-                vx, vy = img_mp_vectors[ann_id]
-                m_np = (np.array(m, dtype=np.float32) > 127).astype(np.float32)
-                dir_np[0] += m_np * vx
-                dir_np[1] += m_np * vy
-
-        dir_t = torch.from_numpy(dir_np).clone()               # (2, H, W)
+        # Re-normalise pixels touched by >1 nail (overlap edge case)
+        norm  = np.sqrt(dir_np[0] ** 2 + dir_np[1] ** 2)
+        valid = norm > 1e-6
+        dir_np[0, valid] /= norm[valid]
+        dir_np[1, valid] /= norm[valid]
+        dir_t = torch.from_numpy(dir_np)                       # (2, H, W)
 
         # ── Finger id tensor (10,) — 0 for unused slots ───────────────────────
         finger_t = torch.zeros(MAX_INSTANCES, dtype=torch.long)
-        # Note: Finger identification is deferred to inference (MediaPipe), 
-        # so we keep these as 0 during standard binary/direction training.
+        for i, lbl in enumerate(finger_labels):
+            finger_t[i] = lbl
 
         return {
             "image"          : img_t,                          # (3,  H, W)
@@ -213,17 +273,18 @@ class NailDataset(Dataset):
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
 
-def make_loaders(dataset_root, mp_json_path, batch_size=8, num_workers=4, image_size=512, val_split=0.1):
+def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
     root = Path(dataset_root)
     
     # If standard 'train' subfolder exists, use it; otherwise use the root itself.
+    # This prevents path doubling like /kaggle/.../train/train/_annotations...
     train_root = root / "train" if (root / "train").exists() else root
     valid_root = root / "valid"
 
-    train_ds = NailDataset(train_root, mp_json_path, augment=True, image_size=image_size)
+    train_ds = NailDataset(train_root, augment=True)
 
     if valid_root.exists():
-        val_ds = NailDataset(valid_root, mp_json_path, augment=False, image_size=image_size)
+        val_ds = NailDataset(valid_root, augment=False)
     else:
         n_val   = int(len(train_ds) * val_split)
         n_train = len(train_ds) - n_val
@@ -245,9 +306,8 @@ def make_loaders(dataset_root, mp_json_path, batch_size=8, num_workers=4, image_
 
 if __name__ == "__main__":
     import sys
-    root   = sys.argv[1] if len(sys.argv) > 1 else "nails_segmentation_coco/train"
-    mp_json = "nails_vton/mp_orientations_v1.json"
-    ds     = NailDataset(root, mp_json_path=mp_json, augment=True)
+    root   = sys.argv[1] if len(sys.argv) > 1 else "data/train"
+    ds     = NailDataset(root, augment=True)
     sample = ds[0]
 
     print("image          :", sample["image"].shape,           sample["image"].dtype)
