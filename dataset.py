@@ -106,7 +106,12 @@ class NailDataset(Dataset):
         for ann in coco["annotations"]:
             aid = ann["image_id"]
             self.id_to_anns.setdefault(aid, [])
-            self.id_to_anns[aid].append(ann)
+            # Surgical memory reduction: only keep keys we actually use
+            compact_ann = {
+                "segmentation": ann.get("segmentation", []),
+                "bbox": ann.get("bbox", [0, 0, 0, 0])
+            }
+            self.id_to_anns[aid].append(compact_ann)
 
         self.image_ids  = []
         self.id_to_path = {}
@@ -268,10 +273,10 @@ def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_
         print(f"[make_loaders] Auto-split → train={n_train}, val={n_val}")
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True,
+                              num_workers=num_workers, pin_memory=False,
                               drop_last=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=True)
+                              num_workers=num_workers, pin_memory=False)
     return train_loader, val_loader
 
 

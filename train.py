@@ -96,17 +96,23 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         final_preds = preds[-1]
         bin_iou  = compute_iou(final_preds[0].detach(), targets["binary_mask"])
         
-        total_loss     += loss_dict["loss_total"]
+        # scalars only!
+        cur_loss_val = loss_dict["loss_total"].item()
+        cur_dir_val  = loss_dict.get('l2_dir', 1.0)
+        if isinstance(cur_dir_val, torch.Tensor):
+            cur_dir_val = cur_dir_val.item()
+
+        total_loss     += cur_loss_val
         total_bin_iou  += bin_iou
-        total_dir_loss += loss_dict.get('l2_dir', 0.0)
+        total_dir_loss += cur_dir_val
 
         if (i + 1) % 50 == 0:
             mem = psutil.virtual_memory().used / (1024**3)
             l_dir_now = loss_dict.get('l2_dir', 0.0)
             print(f"  step {i+1}/{n_batches} | "
-                  f"loss={loss_dict['loss_total']:.4f}  "
+                  f"loss={cur_loss_val:.4f}  "
                   f"bin_iou={bin_iou:.4f}  "
-                  f"dir_loss={l_dir_now:.4f} | "
+                  f"dir_loss={cur_dir_val:.4f} | "
                   f"RAM={mem:.1f}GB")
             
             # Frequent small flush to prevent pile-up
@@ -115,7 +121,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             gc.collect()
 
         # Aggressively delete everything from the GPU/RAM
-        del image, targets, preds, loss
+        del image, targets, preds, loss, loss_dict, final_preds
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
@@ -143,11 +149,15 @@ def validate(model, loader, criterion, device, use_amp):
             _, loss_dict = criterion(preds, targets)
 
         final_preds = preds[-1]
-        total_loss     += loss_dict["loss_total"]
+        total_loss     += loss_dict["loss_total"].item()
         total_bin_iou  += compute_iou(final_preds[0], targets["binary_mask"])
-        total_dir_loss += loss_dict.get('l2_dir', 0.0)
+        
+        val_dir_val = loss_dict.get('l2_dir', 0.0)
+        if isinstance(val_dir_val, torch.Tensor):
+            val_dir_val = val_dir_val.item()
+        total_dir_loss += val_dir_val
 
-        del image, targets, preds
+        del image, targets, preds, loss_dict, final_preds
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
