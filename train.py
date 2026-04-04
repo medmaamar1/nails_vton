@@ -40,6 +40,8 @@ def parse_args():
     p.add_argument("--ckpt_dir",    default="checkpoints")
     p.add_argument("--resume",      default=None)
     p.add_argument("--no_amp",      action="store_true")
+    p.add_argument("--warmup_epochs", type=int, default=5,
+                   help="Linear LR warmup before cosine decay kicks in")
     p.add_argument("--w_binary",    type=float, default=1.0)
     p.add_argument("--w_direction", type=float, default=0.5)
     p.add_argument("--lmp_ratio",   type=float, default=0.1)
