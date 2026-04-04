@@ -98,6 +98,8 @@ class NailVTONLoss(nn.Module):
         """
         total_loss = 0.0
         details = {}
+        agg_bin = 0.0
+        agg_dir = 0.0
 
         for i, preds in enumerate(multi_predictions):
             p_bin, p_dir = preds
@@ -110,14 +112,22 @@ class NailVTONLoss(nn.Module):
             l_bin  = self.binary_loss(p_bin, target_lvl["binary_mask"])
             l_dir  = self.direction_loss(p_dir, target_lvl["direction_field"], valid_mask)
             
-            l_lvl = (self.w_binary * l_bin) + (self.w_direction * l_dir)
+            w_bin = self.w_binary * l_bin
+            w_dir = self.w_direction * l_dir
+            l_lvl = w_bin + w_dir
+            
             total_loss += l_lvl
+            agg_bin += w_bin
+            agg_dir += w_dir
             
             details[f"l{i}_total"] = l_lvl.item()
             details[f"l{i}_bin"]   = l_bin.item()
             details[f"l{i}_dir"]   = l_dir.item()
 
-        details["loss_total"] = total_loss.item()
+        details["loss_total"]     = total_loss.item()
+        details["loss_binary"]    = (agg_bin / len(multi_predictions)).item()
+        details["loss_direction"] = (agg_dir / len(multi_predictions)).item()
+        
         return total_loss, details
 
 # ── Metrics ───────────────────────────────────────────────────────────────────

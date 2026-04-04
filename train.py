@@ -41,7 +41,6 @@ def parse_args():
     p.add_argument("--warmup_epochs", type=int, default=5,
                    help="Linear LR warmup before cosine decay kicks in")
     p.add_argument("--w_binary",    type=float, default=1.0)
-    p.add_argument("--w_instance",  type=float, default=1.0)
     p.add_argument("--w_direction", type=float, default=0.5)
     return p.parse_args()
 
@@ -63,14 +62,13 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
     model.train()
     total_loss     = 0.0
     total_bin_iou  = 0.0
-    total_inst_iou = 0.0
+    total_dir_loss = 0.0
     n_batches      = len(loader)
 
     for i, batch in enumerate(loader):
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
-            "instance_masks" : batch["instance_masks"].to(device,  non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
 
@@ -91,52 +89,57 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-        bin_iou  = compute_iou(preds[0].detach(), targets["binary_mask"])
-        inst_iou = compute_instance_iou(preds[1].detach(), targets["instance_masks"])
+        # Pull final level for metrics
+        final_preds = preds[-1]
+        final_bin   = final_preds[0]
+        bin_iou  = compute_iou(final_bin.detach(), targets["binary_mask"])
+        
         total_loss     += loss_dict["loss_total"]
         total_bin_iou  += bin_iou
-        total_inst_iou += inst_iou
+        total_dir_loss += loss_dict.get('loss_direction', 0.0)
 
         if (i + 1) % 50 == 0:
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={loss_dict['loss_total']:.4f}  "
                   f"bin={loss_dict['loss_binary']:.4f}  "
-                  f"inst={loss_dict['loss_instance']:.4f}  "
                   f"dir={loss_dict['loss_direction']:.4f}  "
-                  f"bin_iou={bin_iou:.4f}  inst_iou={inst_iou:.4f}")
+                  f"bin_iou={bin_iou:.4f}")
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
-            total_inst_iou / n_batches)
+            total_dir_loss / n_batches)
 
 
-@torch.no_grad()
 def validate(model, loader, criterion, device, use_amp):
     model.eval()
     total_loss     = 0.0
     total_bin_iou  = 0.0
-    total_inst_iou = 0.0
+    total_dir_loss = 0.0
     n_batches      = len(loader)
 
     for batch in loader:
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
-            "instance_masks" : batch["instance_masks"].to(device,  non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
+        del batch
 
         with autocast("cuda", enabled=use_amp):
             preds = model(image)
             _, loss_dict = criterion(preds, targets)
 
+        # Use final level for metrics
+        final_bin = preds[-1][0]
         total_loss     += loss_dict["loss_total"]
-        total_bin_iou  += compute_iou(preds[0], targets["binary_mask"])
-        total_inst_iou += compute_instance_iou(preds[1], targets["instance_masks"])
+        total_bin_iou  += compute_iou(final_bin.detach(), targets["binary_mask"])
+        total_dir_loss += loss_dict.get('loss_direction', 0.0)
+
+        del image, targets, preds
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
-            total_inst_iou / n_batches)
+            total_dir_loss / n_batches)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -167,8 +170,8 @@ def main():
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = NailVTONLoss(
+        lmp_ratio   = 0.1,
         w_binary    = args.w_binary,
-        w_instance  = args.w_instance,
         w_direction = args.w_direction,
     )
 
@@ -239,10 +242,10 @@ def main():
         print(f"Epoch {epoch+1}/{args.epochs}  "
               f"LR=[enc={current_lrs[0]}, dec={current_lrs[1]}]")
 
-        train_loss, train_bin_iou, train_inst_iou = train_one_epoch(
+        train_loss, train_bin_iou, train_dir_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, device, use_amp
         )
-        val_loss, val_bin_iou, val_inst_iou = validate(
+        val_loss, val_bin_iou, val_dir_loss = validate(
             model, val_loader, criterion, device, use_amp
         )
 
@@ -250,20 +253,20 @@ def main():
         print(f"Epoch {epoch+1} — {elapsed:.0f}s | "
               f"train loss={train_loss:.4f}  "
               f"bin_iou={train_bin_iou:.4f}  "
-              f"inst_iou={train_inst_iou:.4f} | "
+              f"dir_loss={train_dir_loss:.4f} | "
               f"val loss={val_loss:.4f}  "
               f"val_bin_iou={val_bin_iou:.4f}  "
-              f"val_inst_iou={val_inst_iou:.4f}")
+              f"val_dir_loss={val_dir_loss:.4f}")
 
         # ── Checkpointing ──────────────────────────────────────────────────────
         record = {
             "epoch"          : epoch,
             "train_loss"     : train_loss,
             "train_bin_iou"  : train_bin_iou,
-            "train_inst_iou" : train_inst_iou,
+            "train_dir_loss" : train_dir_loss,
             "val_loss"       : val_loss,
             "val_bin_iou"    : val_bin_iou,
-            "val_inst_iou"   : val_inst_iou,
+            "val_dir_loss"   : val_dir_loss,
         }
         history.append(record)
 

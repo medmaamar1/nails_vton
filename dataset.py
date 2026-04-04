@@ -5,17 +5,8 @@ Loads Roboflow v50 COCO Segmentation JSON.
 Produces per-image:
   1. image           : (3, H, W)       float32 normalised
   2. binary_mask     : (1, H, W)       float32  — union of all nail masks
-  3. instance_masks  : (10, H, W)      float32  — one-hot, channel i = nail i
-  4. direction_field : (2, H, W)       float32  — unit vector base→tip per nail pixel
-  5. finger_ids      : (10,)           int64    — finger label per slot (0=unused,
-                                                  1=thumb, 2=index, 3=middle,
-                                                  4=ring, 5=pinky)
-  6. n_instances     : scalar          int64
-
-Finger identity is derived geometrically — no extra annotation needed:
-  • Thumb  → largest bbox area AND y-centroid is an outlier (below the finger row)
-  • Fingers 2-5 → sorted by x-centroid: leftmost=pinky … rightmost=index
-    (works for either hand; label assignment is position-relative)
+  3. direction_field : (2, H, W)       float32  — unit vector base→tip per nail pixel
+  4. n_instances     : scalar          int64
 """
 
 import json
@@ -31,18 +22,9 @@ import torchvision.transforms.functional as TF
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-MAX_INSTANCES = 10
 IMAGE_SIZE    = 512
 MEAN          = [0.485, 0.456, 0.406]
 STD           = [0.229, 0.224, 0.225]
-
-# Finger label codes
-FINGER_UNUSED = 0
-FINGER_THUMB  = 1
-FINGER_INDEX  = 2
-FINGER_MIDDLE = 3
-FINGER_RING   = 4
-FINGER_PINKY  = 5
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -55,56 +37,6 @@ def polygon_to_mask(polygon, height, width):
         ImageDraw.Draw(mask).polygon(xy, fill=255)
     return mask
 
-
-def assign_finger_ids(bboxes):
-    """
-    Given a list of bboxes [[x,y,w,h], ...] for one image, return a list of
-    finger label codes of the same length.
-
-    Algorithm:
-      1. Compute centroid (cx, cy) and area for each nail.
-      2. Identify thumb: largest area AND cy > median_cy of all nails.
-         If no nail satisfies both, fall back to largest area alone.
-      3. Sort remaining nails by cx (left → right).
-         Assign labels left-to-right: pinky(5) → ring(4) → middle(3) → index(2).
-         If fewer than 4 remain, assign from pinky inward.
-    """
-    n = len(bboxes)
-    if n == 0:
-        return []
-
-    cx_list = [x + w / 2.0 for x, y, w, h in bboxes]
-    cy_list = [y + h / 2.0 for x, y, w, h in bboxes]
-    area_list = [w * h for x, y, w, h in bboxes]
-
-    median_cy = sorted(cy_list)[len(cy_list) // 2]
-
-    # Find thumb index
-    thumb_idx = None
-    best_area = -1
-    for i, (area, cy) in enumerate(zip(area_list, cy_list)):
-        if cy > median_cy and area > best_area:
-            best_area = area
-            thumb_idx = i
-    if thumb_idx is None:                          # fallback: just largest
-        thumb_idx = int(np.argmax(area_list))
-
-    # Remaining nails sorted by cx
-    remaining = [(i, cx_list[i]) for i in range(n) if i != thumb_idx]
-    remaining.sort(key=lambda t: t[1])             # left → right
-
-    # Label map: position 0=leftmost → pinky, last=rightmost → index
-    pos_to_label = [FINGER_PINKY, FINGER_RING, FINGER_MIDDLE, FINGER_INDEX]
-
-    labels = [FINGER_UNUSED] * n
-    labels[thumb_idx] = FINGER_THUMB
-    for pos, (orig_idx, _) in enumerate(remaining):
-        if pos < len(pos_to_label):
-            labels[orig_idx] = pos_to_label[pos]
-        else:
-            labels[orig_idx] = FINGER_UNUSED       # >4 non-thumb nails (rare)
-
-    return labels
 
 
 def compute_direction_field(mask_np, bbox):
@@ -180,18 +112,7 @@ class NailDataset(Dataset):
         masks_pil   = []
         bboxes_orig = []
 
-        for ann in anns[:MAX_INSTANCES]:
-            seg = ann.get("segmentation", [])
-            if not seg or len(seg[0]) < 6:
-                continue
-            masks_pil.append(polygon_to_mask(seg[0], orig_h, orig_w))
-            bboxes_orig.append(ann["bbox"])
 
-        # ── Finger identity ────────────────────────────────────────────────────
-        # We do NOT use the geometric heuristic here — finger identity is resolved
-        # at inference time via MediaPipe in the frontend. The AI only needs to
-        # learn to segment each nail as a distinct instance.
-        finger_labels = [FINGER_UNUSED] * len(bboxes_orig)
 
         # ── Resize to image_size ──────────────────────────────────────────────
         sx = self.image_size / orig_w
@@ -221,12 +142,6 @@ class NailDataset(Dataset):
             binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
         binary_t = torch.from_numpy(binary_np).unsqueeze(0)   # (1, H, W)
 
-        # ── Instance masks — one-hot (10, H, W) ──────────────────────────────
-        inst_np = np.zeros((MAX_INSTANCES, S, S), dtype=np.float32)
-        for i, m in enumerate(masks_resized):
-            inst_np[i] = np.array(m, dtype=np.float32) / 255.0
-        inst_t = torch.from_numpy(inst_np)                     # (10, H, W)
-
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
         for m, bbox in zip(masks_resized, bboxes_resized):
@@ -240,17 +155,10 @@ class NailDataset(Dataset):
         dir_np[1, valid] /= norm[valid]
         dir_t = torch.from_numpy(dir_np)                       # (2, H, W)
 
-        # ── Finger id tensor (10,) — 0 for unused slots ───────────────────────
-        finger_t = torch.zeros(MAX_INSTANCES, dtype=torch.long)
-        for i, lbl in enumerate(finger_labels):
-            finger_t[i] = lbl
-
         return {
             "image"          : img_t,                          # (3,  H, W)
             "binary_mask"    : binary_t,                       # (1,  H, W)
-            "instance_masks" : inst_t,                         # (10, H, W)
             "direction_field": dir_t,                          # (2,  H, W)
-            "finger_ids"     : finger_t,                       # (10,)
             "n_instances"    : torch.tensor(len(masks_resized), dtype=torch.long),
             "image_id"       : image_id,
         }
