@@ -69,15 +69,12 @@ class BinarySegLoss(nn.Module):
 class NailVTONLoss(nn.Module):
     """
     Combined loss over the Laplacian pyramid.
-    Sum of weighted losses across all Levels returned by the model.
+    Sum of unweighted losses across all Levels returned by the model.
     """
-    def __init__(self, lmp_ratio=0.1, w_binary=1.0, w_instance=1.0, w_direction=1.0):
+    def __init__(self, lmp_ratio=0.1):
         super().__init__()
         self.binary_loss    = BinarySegLoss(keep_ratio=lmp_ratio)
         self.direction_loss = DirectionLoss()
-        self.w_binary    = w_binary
-        self.w_instance  = w_instance  # Reserved if instances are re-enabled
-        self.w_direction = w_direction
 
     def _get_target_level(self, targets, size):
         """Linearly interpolate targets to match the scale of the pyramid level."""
@@ -98,8 +95,6 @@ class NailVTONLoss(nn.Module):
         """
         total_loss = 0.0
         details = {}
-        agg_bin = 0.0
-        agg_dir = 0.0
 
         for i, preds in enumerate(multi_predictions):
             p_bin, p_dir = preds
@@ -112,51 +107,28 @@ class NailVTONLoss(nn.Module):
             l_bin  = self.binary_loss(p_bin, target_lvl["binary_mask"])
             l_dir  = self.direction_loss(p_dir, target_lvl["direction_field"], valid_mask)
             
-            w_bin = self.w_binary * l_bin
-            w_dir = self.w_direction * l_dir
-            l_lvl = w_bin + w_dir
-            
+            l_lvl = l_bin + l_dir
             total_loss += l_lvl
-            agg_bin += w_bin
-            agg_dir += w_dir
             
             details[f"l{i}_total"] = l_lvl.item()
             details[f"l{i}_bin"]   = l_bin.item()
             details[f"l{i}_dir"]   = l_dir.item()
 
-        details["loss_total"]     = total_loss.item()
-        details["loss_binary"]    = (agg_bin / len(multi_predictions)).item()
-        details["loss_direction"] = (agg_dir / len(multi_predictions)).item()
-        
+        details["loss_total"] = total_loss.item()
         return total_loss, details
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
 def compute_iou(pred_mask, target_mask, threshold=0.5, eps=1e-6):
-    """
-    Computes binary mIoU: (IoU_foreground + IoU_background) / 2
-    This matches the 'binary mIoU' metric reported in Duke et al. (2019).
-    """
     if pred_mask.max() > 1.0 or pred_mask.min() < 0.0:
         pred_binary = (torch.sigmoid(pred_mask) > threshold).float()
     else:
         pred_binary = (pred_mask > threshold).float()
 
-    # Foreground IoU
-    inter_fg = (pred_binary * target_mask).sum(dim=(-2, -1))
-    union_fg = (pred_binary + target_mask).clamp(0, 1).sum(dim=(-2, -1))
-    iou_fg   = (inter_fg + eps) / (union_fg + eps)
-
-    # Background IoU
-    pred_bg   = 1.0 - pred_binary
-    target_bg = 1.0 - target_mask
-    inter_bg  = (pred_bg * target_bg).sum(dim=(-2, -1))
-    union_bg  = (pred_bg + target_bg).clamp(0, 1).sum(dim=(-2, -1))
-    iou_bg    = (inter_bg + eps) / (union_bg + eps)
-
-    # Return Mean IoU
-    miou = (iou_fg + iou_bg) / 2.0
-    return miou.mean().item()
+    intersection = (pred_binary * target_mask).sum(dim=(-2, -1))
+    union        = (pred_binary + target_mask).clamp(0, 1).sum(dim=(-2, -1))
+    iou          = (intersection + eps) / (union + eps)
+    return iou.mean().item()
 
 
 if __name__ == "__main__":
