@@ -63,7 +63,7 @@ def get_lr_scale(epoch, warmup_epochs, total_epochs):
 def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp):
     model.train()
     total_loss     = 0.0
-    total_bin_iou  = 0.0
+    total_miou     = 0.0
     total_dir_loss = 0.0
     n_batches      = len(loader)
     loader_iter    = iter(loader)
@@ -111,13 +111,13 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         # Pull final level for metrics
         final_preds = preds[-1]
         # targets[1] is binary_mask
-        bin_iou     = float(compute_iou(final_preds[0].detach(), targets[1]))
+        miou        = float(compute_miou(final_preds[0].detach(), targets[1]))
         
         cur_loss_val = float(loss_dict["loss_total"])
         cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
 
         total_loss     += cur_loss_val
-        total_bin_iou  += bin_iou
+        total_miou     += miou
         total_dir_loss += cur_dir_val
 
         # Step-by-step forensic logging
@@ -125,7 +125,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             mem = psutil.virtual_memory().used / (1024**3)
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={cur_loss_val:.4f}  "
-                  f"bin_iou={bin_iou:.4f}  "
+                  f"miou={miou:.4f}  "
                   f"dir_loss={cur_dir_val:.4f} | "
                   f"RAM={mem:.1f}GB")
             
@@ -142,7 +142,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         final_preds = None
 
     return (total_loss     / n_batches,
-            total_bin_iou  / n_batches,
+            total_miou     / n_batches,
             total_dir_loss / n_batches)
 
 
@@ -150,7 +150,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 def validate(model, loader, criterion, device, use_amp):
     model.eval()
     total_loss     = 0.0
-    total_bin_iou  = 0.0
+    total_miou     = 0.0
     total_dir_loss = 0.0
     n_batches      = len(loader)
 
@@ -175,11 +175,11 @@ def validate(model, loader, criterion, device, use_amp):
 
         final_preds    = preds[-1]
         v_loss_val     = float(loss_dict["loss_total"])
-        v_bin_iou_val  = float(compute_iou(final_preds[0], targets[1]))
+        v_miou_val     = float(compute_miou(final_preds[0], targets[1]))
         v_dir_val      = float(loss_dict.get('l2_dir', 0.0))
 
         total_loss     += v_loss_val
-        total_bin_iou  += v_bin_iou_val
+        total_miou     += v_miou_val
         total_dir_loss += v_dir_val
 
         # Cleanup
@@ -190,7 +190,7 @@ def validate(model, loader, criterion, device, use_amp):
         final_preds = None
 
     return (total_loss     / n_batches,
-            total_bin_iou  / n_batches,
+            total_miou     / n_batches,
             total_dir_loss / n_batches)
 
 
@@ -206,9 +206,10 @@ def main():
     # ── Data ───────────────────────────────────────────────────────────────────
     train_loader, val_loader = make_loaders(
         args.data_root,
-        batch_size  = args.batch_size,
-        num_workers = args.num_workers,
-        json_path   = args.json_path,
+        batch_size       = args.batch_size,
+        num_workers      = args.num_workers,
+        json_path        = args.json_path,
+        orientation_path = args.orientation_path
     )
 
     # ── Model ──────────────────────────────────────────────────────────────────
@@ -251,7 +252,7 @@ def main():
 
     # ── Resume ─────────────────────────────────────────────────────────────────
     start_epoch      = 0
-    best_val_bin_iou = 0.0
+    best_val_miou    = 0.0
     history          = []
 
     if args.resume and Path(args.resume).exists():
@@ -272,10 +273,10 @@ def main():
         model.load_state_dict(state_dict)
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch      = ckpt["epoch"] + 1
-        best_val_bin_iou = ckpt.get("best_val_bin_iou", 0.0)
+        best_val_miou    = ckpt.get("best_val_miou", 0.0)
         history          = ckpt.get("history", [])
         print(f"Resumed from epoch {start_epoch}  "
-              f"(best binary IoU={best_val_bin_iou:.4f})")
+              f"(best mIoU={best_val_miou:.4f})")
 
     # ── Checkpoint dir ─────────────────────────────────────────────────────────
     ckpt_dir = Path(args.ckpt_dir)
@@ -291,30 +292,30 @@ def main():
         print(f"Epoch {epoch+1}/{args.epochs}  "
               f"LR=[enc={current_lrs[0]}, dec={current_lrs[1]}]")
 
-        train_loss, train_bin_iou, train_dir_loss = train_one_epoch(
+        train_loss, train_miou, train_dir_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, device, use_amp
         )
-        val_loss, val_bin_iou, val_dir_loss = validate(
+        val_loss, val_miou, val_dir_loss = validate(
             model, val_loader, criterion, device, use_amp
         )
 
         elapsed = time.time() - t0
         print(f"Epoch {epoch+1} — {elapsed:.0f}s | "
               f"train loss={train_loss:.4f}  "
-              f"bin_iou={train_bin_iou:.4f}  "
+              f"miou={train_miou:.4f}  "
               f"dir_loss={train_dir_loss:.4f} | "
               f"val loss={val_loss:.4f}  "
-              f"val_bin_iou={val_bin_iou:.4f}  "
+              f"val_miou={val_miou:.4f}  "
               f"val_dir_loss={val_dir_loss:.4f}")
 
         # ── Checkpointing ──────────────────────────────────────────────────────
         record = {
             "epoch"          : epoch,
             "train_loss"     : train_loss,
-            "train_bin_iou"  : train_bin_iou,
+            "train_miou"     : train_miou,
             "train_dir_loss" : train_dir_loss,
             "val_loss"       : val_loss,
-            "val_bin_iou"    : val_bin_iou,
+            "val_miou"       : val_miou,
             "val_dir_loss"   : val_dir_loss,
         }
         history.append(record)
@@ -323,24 +324,24 @@ def main():
             "epoch"           : epoch,
             "model"           : model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict(),
             "optimizer"       : optimizer.state_dict(),
-            "best_val_bin_iou": best_val_bin_iou,
+            "best_val_miou": best_val_miou,
             "history"         : history,
             "args"            : vars(args),
         }
 
         torch.save(ckpt, ckpt_dir / "latest.pt")
 
-        if val_bin_iou > best_val_bin_iou:
-            best_val_bin_iou = val_bin_iou
-            ckpt["best_val_bin_iou"] = best_val_bin_iou
+        if val_miou > best_val_miou:
+            best_val_miou = val_miou
+            ckpt["best_val_miou"] = best_val_miou
             torch.save(ckpt, ckpt_dir / "best.pt")
-            print(f"  ✓ New best val binary IoU: {best_val_bin_iou:.4f} — saved best.pt")
+            print(f"  ✓ New best val mIoU: {best_val_miou:.4f} — saved best.pt")
 
         with open(ckpt_dir / "history.json", "w") as f:
             json.dump(history, f, indent=2)
 
     print(f"\nTraining complete.")
-    print(f"Best val binary IoU : {best_val_bin_iou:.4f}")
+    print(f"Best val mIoU : {best_val_miou:.4f}")
     print(f"Best checkpoint     : {ckpt_dir / 'best.pt'}")
 
 

@@ -189,9 +189,25 @@ class NailDataset(Dataset):
 
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
-        for m, bbox in zip(masks_resized, bboxes_resized):
+        
+        # Get orientation mapping for this image if loaded
+        img_orientations = self.orientations.get(str(image_id), {}) if hasattr(self, 'orientations') else {}
+
+        for m, bbox, ann in zip(masks_resized, bboxes_resized, anns):
             mask_np = np.array(m, dtype=np.uint8)
-            dir_np += compute_direction_field(mask_np, bbox)
+            ann_id_str = str(ann.get("id", ""))
+            
+            if ann_id_str in img_orientations:
+                # Use ground-truth orientation [dx, dy]
+                dx, dy = img_orientations[ann_id_str]
+                
+                # Create a uniform directional vector for the foreground area
+                vector_field = np.zeros((2, S, S), dtype=np.float32)
+                vector_field[0, mask_np > 0] = dx
+                vector_field[1, mask_np > 0] = dy
+                dir_np += vector_field
+            else:
+                dir_np += compute_direction_field(mask_np, bbox)
 
         # Re-normalise pixels touched by >1 nail (overlap edge case)
         norm  = np.sqrt(dir_np[0] ** 2 + dir_np[1] ** 2)
@@ -231,7 +247,7 @@ class NailDataset(Dataset):
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
 
-def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_path=None):
+def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_path=None, orientation_path=None):
     root = Path(dataset_root)
     
     # If standard 'train' subfolder exists, use it; otherwise use the root itself.
@@ -239,10 +255,10 @@ def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_
     train_root = root / "train" if (root / "train").exists() else root
     valid_root = root / "valid"
 
-    train_ds = NailDataset(train_root, augment=True, json_path=json_path)
+    train_ds = NailDataset(train_root, augment=True, json_path=json_path, orientation_path=orientation_path)
 
     if valid_root.exists():
-        val_ds = NailDataset(valid_root, augment=False, json_path=json_path)
+        val_ds = NailDataset(valid_root, augment=False, json_path=json_path, orientation_path=orientation_path)
     else:
         n_val   = int(len(train_ds) * val_split)
         n_train = len(train_ds) - n_val
