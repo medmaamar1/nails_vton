@@ -69,12 +69,15 @@ class BinarySegLoss(nn.Module):
 class NailVTONLoss(nn.Module):
     """
     Combined loss over the Laplacian pyramid.
-    Sum of unweighted losses across all Levels returned by the model.
+    Sum of weighted losses across all Levels returned by the model.
     """
-    def __init__(self, lmp_ratio=0.1):
+    def __init__(self, lmp_ratio=0.1, w_binary=1.0, w_instance=1.0, w_direction=1.0):
         super().__init__()
         self.binary_loss    = BinarySegLoss(keep_ratio=lmp_ratio)
         self.direction_loss = DirectionLoss()
+        self.w_binary    = w_binary
+        self.w_instance  = w_instance  # Reserved if instances are re-enabled
+        self.w_direction = w_direction
 
     def _get_target_level(self, targets, size):
         """Linearly interpolate targets to match the scale of the pyramid level."""
@@ -107,7 +110,7 @@ class NailVTONLoss(nn.Module):
             l_bin  = self.binary_loss(p_bin, target_lvl["binary_mask"])
             l_dir  = self.direction_loss(p_dir, target_lvl["direction_field"], valid_mask)
             
-            l_lvl = l_bin + l_dir
+            l_lvl = (self.w_binary * l_bin) + (self.w_direction * l_dir)
             total_loss += l_lvl
             
             details[f"l{i}_total"] = l_lvl.item()
