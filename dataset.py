@@ -27,6 +27,8 @@ MEAN          = [0.485, 0.456, 0.406]
 STD           = [0.229, 0.224, 0.225]
 
 
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def polygon_to_mask(polygon, height, width):
@@ -36,6 +38,9 @@ def polygon_to_mask(polygon, height, width):
         xy = list(zip(polygon[::2], polygon[1::2]))
         ImageDraw.Draw(mask).polygon(xy, fill=255)
     return mask
+
+
+
 
 
 def compute_direction_field(mask_np, bbox):
@@ -71,39 +76,88 @@ class NailDataset(Dataset):
         self.augment    = augment
         self.image_size = image_size
 
-        ann_path = self.root / "_annotations.coco.json"
-        with open(ann_path, "r") as f:
+        image_size = self.image_size # Local cache
+
+        if json_path is not None:
+            ann_path = Path(json_path)
+            print(f"[NailDataset] Using custom JSON path: {ann_path}")
+        else:
+            ann_path = self.root / "_annotations.coco.json"
+            
+        with open(ann_path, "r", encoding='utf-8') as f:
             coco = json.load(f)
 
-        self.id_to_file = {img["id"]: img["file_name"] for img in coco["images"]}
+        # Pre-resolve image paths by scanning the directory (recursive).
+        # This workaround handles Roboflow long filenames that may be truncated 
+        # on certain filesystems (Kaggle/Linux) causing OSError: [Errno 36].
+        print(f"[NailDataset] Mapping files in {self.root}...")
+        all_files = list(self.root.rglob("*.jpg")) + list(self.root.rglob("*.png"))
+        
+        # Maps for quick lookup: hash -> Path, and name -> Path
+        hash_to_path = {}
+        name_to_path = {}
+        for p in all_files:
+            name_to_path[p.name] = p
+            if ".rf." in p.name:
+                h = p.name.split(".rf.")[-1].split(".")[0]
+                hash_to_path[h] = p
 
         self.id_to_anns = {}
         for ann in coco["annotations"]:
-            iid = ann["image_id"]
-            self.id_to_anns.setdefault(iid, [])
-            self.id_to_anns[iid].append(ann)
+            aid = ann["image_id"]
+            self.id_to_anns.setdefault(aid, [])
+            self.id_to_anns[aid].append(ann)
 
-        self.image_ids = [
-            iid for iid in self.id_to_file
-            if iid in self.id_to_anns and len(self.id_to_anns[iid]) > 0
-        ]
+        self.image_ids  = []
+        self.id_to_path = {}
 
-        print(f"[NailDataset] {len(self.image_ids)} images  "
-              f"(root={root}, augment={augment})")
+        for img in coco["images"]:
+            iid = img["id"]
+            # Skip if no annotations or if there are no successfully identified fingers (>0)
+            if iid not in self.id_to_anns or not self.id_to_anns[iid]:
+                continue
+            
+            fname = img["file_name"]
+            rf_hash = fname.split(".rf.")[-1].split(".")[0] if ".rf." in fname else None
+            
+            # Attempt to find the file using: hash -> direct name -> fallback images subfolder
+            target_path = None
+            if rf_hash and rf_hash in hash_to_path:
+                target_path = hash_to_path[rf_hash]
+            elif fname in name_to_path:
+                target_path = name_to_path[fname]
+            else:
+                # Final check (handles cases where rglob might have missed it or path is weird)
+                try:
+                    p1 = self.root / fname
+                    p2 = self.root / "images" / fname
+                    if p1.exists(): target_path = p1
+                    elif p2.exists(): target_path = p2
+                except OSError: # Still too long? Skip it.
+                    pass
+
+            if target_path:
+                self.id_to_path[iid] = target_path
+                self.image_ids.append(iid)
+
+        print(f"[NailDataset] Loaded {len(self.image_ids)} valid images (root={root}, augment={augment})")
+
+        # Free memory (JSON and file list can be large)
+        if 'coco' in locals(): del coco
+        if 'all_files' in locals(): del all_files
+        if 'hash_to_path' in locals(): del hash_to_path
+        if 'name_to_path' in locals(): del name_to_path
 
     def __len__(self):
         return len(self.image_ids)
 
     def __getitem__(self, idx):
         image_id  = self.image_ids[idx]
-        file_name = self.id_to_file[image_id]
+        img_path  = self.id_to_path[image_id]
         anns      = self.id_to_anns[image_id]
 
         # ── Load image ────────────────────────────────────────────────────────
-        img_path = self.root / file_name
-        if not img_path.exists():
-            img_path = self.root / "images" / file_name
-        image          = Image.open(img_path).convert("RGB")
+        image     = Image.open(img_path).convert("RGB")
         orig_w, orig_h = image.size
 
         # ── Build per-nail masks at original resolution ───────────────────────
@@ -122,14 +176,12 @@ class NailDataset(Dataset):
         sy = self.image_size / orig_h
         image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
 
-        masks_resized  = []
         bboxes_resized = []
-        for m, bbox in zip(masks_pil, bboxes_orig):
-            masks_resized.append(
-                m.resize((self.image_size, self.image_size), Image.NEAREST)
-            )
-            x, y, w, h = bbox
+        for m, (x, y, w, h) in zip(masks_pil, bboxes_orig):
+            m_resized = m.resize((self.image_size, self.image_size), Image.NEAREST)
+            masks_resized.append(m_resized)
             bboxes_resized.append([x * sx, y * sy, w * sx, h * sy])
+            # Explicitly close original to save RAM
             m.close()
 
         del masks_pil
@@ -147,7 +199,7 @@ class NailDataset(Dataset):
         binary_np = np.zeros((S, S), dtype=np.float32)
         for m in masks_resized:
             binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
-        binary_t = torch.from_numpy(binary_np).unsqueeze(0)   # (1, H, W)
+        binary_t = torch.from_numpy(binary_np).clone().unsqueeze(0)   # (1, H, W)
 
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
@@ -160,9 +212,9 @@ class NailDataset(Dataset):
         valid = norm > 1e-6
         dir_np[0, valid] /= norm[valid]
         dir_np[1, valid] /= norm[valid]
-        dir_t = torch.from_numpy(dir_np)                       # (2, H, W)
+        dir_t = torch.from_numpy(dir_np).clone()                       # (2, H, W)
 
-        # Disposal
+        # Cleanup explicitly to prevent multiprocess IPC leaks
         image.close()
         for m in masks_resized:
             m.close()
@@ -174,6 +226,8 @@ class NailDataset(Dataset):
             "n_instances"    : torch.tensor(len(masks_resized), dtype=torch.long),
             "image_id"       : image_id,
         }
+
+    # ── Augmentation ──────────────────────────────────────────────────────────
 
     def _augment(self, image, masks):
         if random.random() > 0.5:
@@ -189,8 +243,13 @@ class NailDataset(Dataset):
         return image, masks
 
 
+# ── DataLoader factory ─────────────────────────────────────────────────────────
+
 def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
     root = Path(dataset_root)
+    
+    # If standard 'train' subfolder exists, use it; otherwise use the root itself.
+    # This prevents path doubling like /kaggle/.../train/train/_annotations...
     train_root = root / "train" if (root / "train").exists() else root
     valid_root = root / "valid"
 
@@ -205,6 +264,7 @@ def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
             train_ds, [n_train, n_val],
             generator=torch.Generator().manual_seed(42)
         )
+        print(f"[make_loaders] Auto-split → train={n_train}, val={n_val}")
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True,
@@ -213,6 +273,8 @@ def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
                               num_workers=num_workers, pin_memory=True)
     return train_loader, val_loader
 
+
+# ── Sanity check ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import sys

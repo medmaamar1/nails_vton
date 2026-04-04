@@ -114,6 +114,7 @@ class NailVTONLoss(nn.Module):
             details[f"l{i}_bin"]   = l_bin.item()
             details[f"l{i}_dir"]   = l_dir.item()
 
+        details["l2_dir"]     = sum(details[f"l{i}_dir"] for i in range(len(multi_predictions))) / len(multi_predictions)
         details["loss_total"] = total_loss.item()
         return total_loss, details
 
@@ -138,8 +139,8 @@ if __name__ == "__main__":
     outs = model(dummy)
     
     targets = {
-        "binary_mask": (torch.rand(2, 1, 448, 448) > 0.8).float(),
-        "direction_field": torch.randn(2, 2, 448, 448)
+        "binary_mask": (torch.rand(2, 1, 512, 512) > 0.8).float(),
+        "direction_field": torch.randn(2, 2, 512, 512)
     }
     
     criterion = NailVTONLoss()
