@@ -79,8 +79,8 @@ class PyramidHeads(nn.Module):
         self.shared = DepthwiseSeparable(in_ch, 10)
         
         # Branch from shared features:
-        # Fgbg: 1x1 conv to 1 channel (Mathematically equivalent to '1x1 conv 2' + Softmax in paper)
-        self.binary    = nn.Conv2d(10, 1, 1)
+        # Fgbg: 1x1 conv to 2 channels (Softmax on 2 classes for background and foreground)
+        self.binary    = nn.Conv2d(10, 2, 1)
         # Direction: '1x1 conv 2'
         self.direction = nn.Conv2d(10, 2, 1)
 
@@ -155,8 +155,10 @@ class NailVTONModel(nn.Module):
         self.eval()
         multi_preds = self(x)
         final_bin, final_dir = multi_preds[-1]
+        # Binary output is now (B, 2, H, W). Use softmax and take foreground channel (index 1).
+        prob_fg = torch.softmax(final_bin, dim=1)[:, 1:2]
         return (
-            torch.sigmoid(final_bin) > binary_thresh,
+            prob_fg > binary_thresh,
             final_dir,
         )
 

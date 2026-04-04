@@ -19,10 +19,14 @@ class LMPLoss(nn.Module):
         self.keep_ratio = keep_ratio
 
     def forward(self, logits, targets):
-        """logits, targets: (B, 1, H, W)"""
-        loss_map  = F.binary_cross_entropy_with_logits(
-            logits, targets, reduction="none"
-        )
+        """
+        logits  : (B, 2, H, W)
+        targets : (B, 1, H, W) float mask (0 or 1)
+        """
+        # Equation 1: Multinomial NLL (Cross Entropy)
+        # Convert targets to long indices (B, H, W)
+        targets_long = targets.squeeze(1).long()
+        loss_map = F.cross_entropy(logits, targets_long, reduction="none")
         B         = loss_map.shape[0]
         loss_flat = loss_map.view(B, -1)
         k         = max(1, int(loss_flat.size(1) * self.keep_ratio))
@@ -129,10 +133,16 @@ def compute_miou(pred_mask, target_mask, threshold=0.5, eps=1e-6):
     Computes Mean Intersection over Union (mIoU) for binary segmentation.
     mIoU = (IoU_foreground + IoU_background) / 2
     """
-    if pred_mask.max() > 1.0 or pred_mask.min() < 0.0:
-        pred_binary = (torch.sigmoid(pred_mask) > threshold).float()
+    if pred_mask.shape[1] == 2:
+        # Multinomial NLL setup: Take index 1 (foreground)
+        prob_fg = torch.softmax(pred_mask, dim=1)[:, 1:2]
+        pred_binary = (prob_fg > threshold).float()
     else:
-        pred_binary = (pred_mask > threshold).float()
+        # Legacy single-channel setup
+        if pred_mask.max() > 1.0 or pred_mask.min() < 0.0:
+            pred_binary = (torch.sigmoid(pred_mask) > threshold).float()
+        else:
+            pred_binary = (pred_mask > threshold).float()
 
     # Foreground IoU
     intersection_fg = (pred_binary * target_mask).sum(dim=(-2, -1))
