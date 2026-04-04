@@ -124,16 +124,31 @@ class NailVTONLoss(nn.Module):
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
-def compute_iou(pred_mask, target_mask, threshold=0.5, eps=1e-6):
+def compute_miou(pred_mask, target_mask, threshold=0.5, eps=1e-6):
+    """
+    Computes Mean Intersection over Union (mIoU) for binary segmentation.
+    mIoU = (IoU_foreground + IoU_background) / 2
+    """
     if pred_mask.max() > 1.0 or pred_mask.min() < 0.0:
         pred_binary = (torch.sigmoid(pred_mask) > threshold).float()
     else:
         pred_binary = (pred_mask > threshold).float()
 
-    intersection = (pred_binary * target_mask).sum(dim=(-2, -1))
-    union        = (pred_binary + target_mask).clamp(0, 1).sum(dim=(-2, -1))
-    iou          = (intersection + eps) / (union + eps)
-    return iou.mean().item()
+    # Foreground IoU
+    intersection_fg = (pred_binary * target_mask).sum(dim=(-2, -1))
+    union_fg        = (pred_binary + target_mask).clamp(0, 1).sum(dim=(-2, -1))
+    iou_fg          = (intersection_fg + eps) / (union_fg + eps)
+
+    # Background IoU
+    pred_bg   = 1.0 - pred_binary
+    target_bg = 1.0 - target_mask
+    intersection_bg = (pred_bg * target_bg).sum(dim=(-2, -1))
+    union_bg        = (pred_bg + target_bg).clamp(0, 1).sum(dim=(-2, -1))
+    iou_bg          = (intersection_bg + eps) / (union_bg + eps)
+
+    # mIoU is mean of foreground and background
+    miou = (iou_fg + iou_bg) / 2.0
+    return miou.mean().item()
 
 
 if __name__ == "__main__":

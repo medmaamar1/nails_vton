@@ -24,7 +24,7 @@ from torch.amp import GradScaler, autocast
 sys.path.insert(0, str(Path(__file__).parent))
 from dataset import make_loaders
 from model   import NailVTONModel
-from losses  import NailVTONLoss, compute_iou
+from losses  import NailVTONLoss, compute_miou
 
 
 # ── Args ───────────────────────────────────────────────────────────────────────
@@ -44,6 +44,8 @@ def parse_args():
     p.add_argument("--warmup_epochs", type=int, default=5,
                    help="Linear LR warmup before cosine decay kicks in")
 
+    p.add_argument("--orientation_path", default="/kaggle/input/datasets/almohamed132/nails-orientation/mp_orientations_v1.json", 
+                   help="Path to mp_orientations_v1.json for strict orientation filtering")
     return p.parse_args()
 
 
