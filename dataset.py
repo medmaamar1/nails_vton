@@ -71,7 +71,7 @@ def compute_direction_field(mask_np, bbox):
 # ── Dataset ────────────────────────────────────────────────────────────────────
 
 class NailDataset(Dataset):
-    def __init__(self, root, augment=False, image_size=IMAGE_SIZE):
+    def __init__(self, root, augment=False, image_size=IMAGE_SIZE, json_path=None):
         self.root       = Path(root)
         self.augment    = augment
         self.image_size = image_size
@@ -245,7 +245,7 @@ class NailDataset(Dataset):
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
 
-def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
+def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_path=None):
     root = Path(dataset_root)
     
     # If standard 'train' subfolder exists, use it; otherwise use the root itself.
@@ -253,10 +253,10 @@ def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1):
     train_root = root / "train" if (root / "train").exists() else root
     valid_root = root / "valid"
 
-    train_ds = NailDataset(train_root, augment=True)
+    train_ds = NailDataset(train_root, augment=True, json_path=json_path)
 
     if valid_root.exists():
-        val_ds = NailDataset(valid_root, augment=False)
+        val_ds = NailDataset(valid_root, augment=False, json_path=json_path)
     else:
         n_val   = int(len(train_ds) * val_split)
         n_train = len(train_ds) - n_val

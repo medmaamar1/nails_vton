@@ -165,6 +165,7 @@ def main():
         args.data_root,
         batch_size  = args.batch_size,
         num_workers = args.num_workers,
+        json_path   = args.json_path,
     )
 
     # ── Model ──────────────────────────────────────────────────────────────────
