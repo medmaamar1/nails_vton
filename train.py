@@ -176,7 +176,8 @@ def main():
     # Encoder (pretrained) gets 10× lower LR than decoder (random init)
     base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     
-    encoder_params = list(base_model.encoder.parameters())
+    encoder_params = list(base_model.encoder_low.parameters()) + \
+                     list(base_model.encoder_high.parameters())
     encoder_ids    = {id(p) for p in encoder_params}
     decoder_params = [p for p in model.parameters() if id(p) not in encoder_ids]
 
