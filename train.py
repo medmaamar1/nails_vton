@@ -97,10 +97,12 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         bin_iou  = compute_iou(final_preds[0].detach(), targets["binary_mask"])
         
         # scalars only!
-        cur_loss_val = loss_dict["loss_total"].item()
+        cur_loss_val = loss_dict["loss_total"]
         cur_dir_val  = loss_dict.get('l2_dir', 1.0)
-        if isinstance(cur_dir_val, torch.Tensor):
-            cur_dir_val = cur_dir_val.item()
+        
+        # If they are tensors (unlikely now), convert to item
+        if hasattr(cur_loss_val, 'item'): cur_loss_val = cur_loss_val.item()
+        if hasattr(cur_dir_val, 'item'):  cur_dir_val  = cur_dir_val.item()
 
         total_loss     += cur_loss_val
         total_bin_iou  += bin_iou
@@ -149,11 +151,14 @@ def validate(model, loader, criterion, device, use_amp):
             _, loss_dict = criterion(preds, targets)
 
         final_preds = preds[-1]
-        total_loss     += loss_dict["loss_total"].item()
+        v_loss = loss_dict["loss_total"]
+        if hasattr(v_loss, 'item'): v_loss = v_loss.item()
+        total_loss     += v_loss
+        
         total_bin_iou  += compute_iou(final_preds[0], targets["binary_mask"])
         
         val_dir_val = loss_dict.get('l2_dir', 0.0)
-        if isinstance(val_dir_val, torch.Tensor):
+        if hasattr(val_dir_val, 'item'):
             val_dir_val = val_dir_val.item()
         total_dir_loss += val_dir_val
 
