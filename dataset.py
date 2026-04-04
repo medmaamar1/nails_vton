@@ -208,17 +208,17 @@ class NailDataset(Dataset):
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
 
-def make_loaders(dataset_root, mp_json_path, batch_size=8, num_workers=4, val_split=0.1):
+def make_loaders(dataset_root, mp_json_path, batch_size=8, num_workers=4, image_size=512, val_split=0.1):
     root = Path(dataset_root)
     
     # If standard 'train' subfolder exists, use it; otherwise use the root itself.
     train_root = root / "train" if (root / "train").exists() else root
     valid_root = root / "valid"
 
-    train_ds = NailDataset(train_root, mp_json_path, augment=True)
+    train_ds = NailDataset(train_root, mp_json_path, augment=True, image_size=image_size)
 
     if valid_root.exists():
-        val_ds = NailDataset(valid_root, mp_json_path, augment=False)
+        val_ds = NailDataset(valid_root, mp_json_path, augment=False, image_size=image_size)
     else:
         n_val   = int(len(train_ds) * val_split)
         n_train = len(train_ds) - n_val
