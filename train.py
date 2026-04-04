@@ -83,13 +83,14 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         except StopIteration:
             break
 
-        # Phase 6: targets is now a 3-tuple (img, bin, dir)
+        # Phase 7: targets is now a 4-tuple (img, bin, finger, dir)
         # BARE MINIMUM GPU TRANSFER
         image   = batch[0].to("cuda:0", non_blocking=True)
         targets = (
             None, # placeholder for img
             batch[1].to("cuda:0", non_blocking=True), # binary_mask
-            batch[2].to("cuda:0", non_blocking=True)  # direction_field
+            batch[2].to("cuda:0", non_blocking=True), # finger_mask
+            batch[3].to("cuda:0", non_blocking=True)  # direction_field
         )
         batch = None # Kill CPU batch immediately
 
@@ -117,6 +118,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         
         cur_loss_val = float(loss_dict["loss_total"])
         cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
+        cur_fin_val  = float(loss_dict.get('l_fin', 1.0))
 
         total_loss     += cur_loss_val
         total_miou     += miou
@@ -128,7 +130,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={cur_loss_val:.4f}  "
                   f"miou={miou:.4f}  "
-                  f"dir_loss={cur_dir_val:.4f} | "
+                  f"dir_loss={cur_dir_val:.4f}  "
+                  f"fin_loss={cur_fin_val:.4f} | "
                   f"RAM={mem:.1f}GB")
             
             torch.cuda.synchronize()
@@ -167,7 +170,8 @@ def validate(model, loader, criterion, device, use_amp):
         targets = (
             None,
             batch[1].to("cuda:0", non_blocking=True),
-            batch[2].to("cuda:0", non_blocking=True)
+            batch[2].to("cuda:0", non_blocking=True),
+            batch[3].to("cuda:0", non_blocking=True)
         )
         batch = None
 
