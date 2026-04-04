@@ -237,21 +237,17 @@ def main():
         elapsed = time.time() - t0
         print(f"Epoch {epoch+1} — {elapsed:.0f}s | "
               f"train loss={train_loss:.4f}  "
-              f"bin_iou={train_bin_iou:.4f}  "
-              f"inst_iou={train_inst_iou:.4f} | "
+              f"bin_iou={train_bin_iou:.4f} | "
               f"val loss={val_loss:.4f}  "
-              f"val_bin_iou={val_bin_iou:.4f}  "
-              f"val_inst_iou={val_inst_iou:.4f}")
+              f"val_bin_iou={val_bin_iou:.4f}")
 
         # ── Checkpointing ──────────────────────────────────────────────────────
         record = {
             "epoch"          : epoch,
             "train_loss"     : train_loss,
             "train_bin_iou"  : train_bin_iou,
-            "train_inst_iou" : train_inst_iou,
             "val_loss"       : val_loss,
             "val_bin_iou"    : val_bin_iou,
-            "val_inst_iou"   : val_inst_iou,
         }
         history.append(record)
 

@@ -90,6 +90,11 @@ class NailDataset(Dataset):
             if str(iid) in self.mp_data and len(self.id_to_anns.get(iid, [])) > 0
         ]
 
+        # RAM Optimization: Prune the dictionary to only keep filtered IDs.
+        # This prevents DataLoader workers from carrying the entire raw dataset JSON in memory.
+        valid_str_ids = {str(iid) for iid in self.image_ids}
+        self.mp_data = {k: v for k, v in self.mp_data.items() if k in valid_str_ids}
+
         print(f"[NailDataset] Filtered to {len(self.image_ids)} verified images  "
               f"(root={root}, augment={augment})")
 
