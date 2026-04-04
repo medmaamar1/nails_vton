@@ -66,14 +66,19 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
     total_bin_iou  = 0.0
     total_dir_loss = 0.0
     n_batches      = len(loader)
+    loader_iter    = iter(loader)
+    for i in range(n_batches):
+        try:
+            batch = next(loader_iter)
+        except StopIteration:
+            break
 
-    for i, batch in enumerate(loader):
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
-        del batch  # Release unused CPU tensors immediately
+        batch = None # Phase 4: Explicitly nullify CPU batch immediately
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -94,21 +99,17 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
         # Pull final level for metrics
         final_preds = preds[-1]
-        bin_iou  = compute_iou(final_preds[0].detach(), targets["binary_mask"])
+        bin_iou     = float(compute_iou(final_preds[0].detach(), targets["binary_mask"]))
         
-        # scalars only!
-        cur_loss_val = loss_dict["loss_total"]
-        cur_dir_val  = loss_dict.get('l2_dir', 1.0)
-        
-        # If they are tensors (unlikely now), convert to item
-        if hasattr(cur_loss_val, 'item'): cur_loss_val = cur_loss_val.item()
-        if hasattr(cur_dir_val, 'item'):  cur_dir_val  = cur_dir_val.item()
+        cur_loss_val = float(loss_dict["loss_total"])
+        cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
 
         total_loss     += cur_loss_val
         total_bin_iou  += bin_iou
         total_dir_loss += cur_dir_val
 
-        if (i + 1) % 50 == 0 or i < 100:
+        # Forensic logging every step initially
+        if i < 50 or (i + 1) % 50 == 0:
             mem = psutil.virtual_memory().used / (1024**3)
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={cur_loss_val:.4f}  "
@@ -116,13 +117,18 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
                   f"dir_loss={cur_dir_val:.4f} | "
                   f"RAM={mem:.1f}GB")
             
-            # Frequent small flush to prevent pile-up
+            # Phase 4 Lockdown: Synchronize and Force Deep Collection
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-            gc.collect()
+            gc.collect(2)
 
-        # Aggressively delete everything from the GPU/RAM
-        del image, targets, preds, loss, loss_dict, final_preds
+        # Surgical Nullification
+        image       = None
+        targets     = None
+        preds       = None
+        loss        = None
+        loss_dict   = None
+        final_preds = None
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
@@ -137,31 +143,39 @@ def validate(model, loader, criterion, device, use_amp):
     total_dir_loss = 0.0
     n_batches      = len(loader)
 
-    for batch in loader:
+    loader_iter = iter(loader)
+    for _ in range(n_batches):
+        try:
+            batch = next(loader_iter)
+        except StopIteration:
+            break
+
         image   = batch["image"].to(device, non_blocking=True)
         targets = {
             "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
             "direction_field": batch["direction_field"].to(device, non_blocking=True),
         }
-        del batch
+        batch = None
 
         with autocast("cuda", enabled=use_amp):
             preds = model(image)
             _, loss_dict = criterion(preds, targets)
 
-        final_preds = preds[-1]
-        v_loss = loss_dict["loss_total"]
-        if hasattr(v_loss, 'item'): v_loss = v_loss.item()
-        total_loss     += v_loss
-        
-        total_bin_iou  += compute_iou(final_preds[0], targets["binary_mask"])
-        
-        val_dir_val = loss_dict.get('l2_dir', 0.0)
-        if hasattr(val_dir_val, 'item'):
-            val_dir_val = val_dir_val.item()
-        total_dir_loss += val_dir_val
+        final_preds    = preds[-1]
+        v_loss_val     = float(loss_dict["loss_total"])
+        v_bin_iou_val  = float(compute_iou(final_preds[0], targets["binary_mask"]))
+        v_dir_val      = float(loss_dict.get('l2_dir', 0.0))
 
-        del image, targets, preds, loss_dict, final_preds
+        total_loss     += v_loss_val
+        total_bin_iou  += v_bin_iou_val
+        total_dir_loss += v_dir_val
+
+        # Cleanup
+        image       = None
+        targets     = None
+        preds       = None
+        loss_dict   = None
+        final_preds = None
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches,
