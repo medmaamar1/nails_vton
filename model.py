@@ -123,15 +123,17 @@ class NailVTONModel(nn.Module):
             feat_high = self.encoder_high(x)
             feat_low_s4, feat_low_s8 = self.encoder_low(x_half)
 
-        # 1. Low-Resolution side-output (Level 0)
+        # 1. Low-Resolution Fusion (Level 0 side-output)
+        # Matches Section 3.2: "fuses H/16 x W/16 features from stage_low4 with upsampled stage_low8"
         f0 = self.fusion_low(feat_low_s8, feat_low_s4)
         out0_bin, out0_dir = self.head_l0(f0)
 
-        # 2. Mid-Resolution side-output (Level 1)
+        # 2. High-Resolution Fusion (Level 1 side-output)
+        # Matches Section 3.2: "fuses resulting features with H/8 x W/8 features from stage_high4"
         f1 = self.fusion_high(f0, feat_high)
         out1_bin, out1_dir = self.head_l1(f1)
-        
-        # 3. Full-Resolution output (Level 2/Final)
+
+        # 3. Final Output (Upsampled to full resolution)
         out2_bin, out2_dir = self.head_final(f1)
         
         def _norm_dir(d):
