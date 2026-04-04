@@ -138,8 +138,8 @@ if __name__ == "__main__":
     outs = model(dummy)
     
     targets = {
-        "binary_mask": (torch.rand(2, 1, 512, 512) > 0.8).float(),
-        "direction_field": torch.randn(2, 2, 512, 512)
+        "binary_mask": (torch.rand(2, 1, 448, 448) > 0.8).float(),
+        "direction_field": torch.randn(2, 2, 448, 448)
     }
     
     criterion = NailVTONLoss()
