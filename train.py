@@ -91,7 +91,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-        bin_iou  = compute_iou(preds[0][0].detach(), targets["binary_mask"])
+        bin_iou  = compute_iou(preds[-1][0].detach(), targets["binary_mask"])
         total_loss     += loss_dict["loss_total"]
         total_bin_iou  += bin_iou
 
@@ -125,7 +125,7 @@ def validate(model, loader, criterion, device, use_amp):
             _, loss_dict = criterion(preds, targets)
 
         total_loss     += loss_dict["loss_total"]
-        total_bin_iou  += compute_iou(preds[0][0], targets["binary_mask"])
+        total_bin_iou  += compute_iou(preds[-1][0], targets["binary_mask"])
 
     return (total_loss     / n_batches,
             total_bin_iou  / n_batches)
