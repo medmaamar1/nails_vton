@@ -29,7 +29,7 @@ from losses  import NailVTONLoss, compute_iou
 
 def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
-    p.add_argument("--data_root",   default="/kaggle/input/datasets/maamarmohamed/nail-segmentation/train")
+    p.add_argument("--data_root",   default="/kaggle/input/datasets/almohamed132/nails-vton/train")
     p.add_argument("--mp_json",     default="/kaggle/input/datasets/almohamed132/nails-orientation/mp_orientations_v1.json",
                    help="Path to the MediaPipe skeletal orientation cache")
     p.add_argument("--epochs",      type=int,   default=100)
