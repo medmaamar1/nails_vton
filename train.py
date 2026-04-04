@@ -68,12 +68,11 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
     n_batches      = len(loader)
     loader_iter    = iter(loader)
     for i in range(n_batches):
-        # Phase 5 Nuclear: Recycle iterator every 50 steps to purge zombie refs
+        # Iterator Recycling: Force-purge zombie references
         if i > 0 and i % 50 == 0:
             del loader_iter
             gc.collect(2)
             torch.cuda.empty_cache()
-            # Recreate iterator and skip completed batches
             loader_iter = iter(loader)
             for _ in range(i): next(loader_iter)
 
@@ -82,18 +81,16 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         except StopIteration:
             break
 
-        # Phase 5: batch is now a Tuple (img, bin, dir, n, id)
-        # Move tensors to device (indices 1, 2, 3)
-        image   = batch[0].to(device, non_blocking=True)
+        # Phase 6: targets is now a 3-tuple (img, bin, dir)
+        # BARE MINIMUM GPU TRANSFER
+        image   = batch[0].to("cuda:0", non_blocking=True)
         targets = (
-            batch[0], # placeholder (not used as target)
-            batch[1].to(device, non_blocking=True), # binary_mask
-            batch[2].to(device, non_blocking=True), # direction_field
-            batch[3].to(device, non_blocking=True), # n_instances
-            batch[4] # image_id (string)
+            None, # placeholder for img
+            batch[1].to("cuda:0", non_blocking=True), # binary_mask
+            batch[2].to("cuda:0", non_blocking=True)  # direction_field
         )
-        batch = None # Phase 4: Explicitly nullify CPU batch immediately
-        
+        batch = None # Kill CPU batch immediately
+
         optimizer.zero_grad(set_to_none=True)
 
         with autocast("cuda", enabled=use_amp):
@@ -113,7 +110,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
         # Pull final level for metrics
         final_preds = preds[-1]
-        # targets[1] is binary_mask (already on device now)
+        # targets[1] is binary_mask
         bin_iou     = float(compute_iou(final_preds[0].detach(), targets[1]))
         
         cur_loss_val = float(loss_dict["loss_total"])
@@ -123,8 +120,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         total_bin_iou  += bin_iou
         total_dir_loss += cur_dir_val
 
-        # Forensic logging every step initially
-        if i < 50 or (i + 1) % 50 == 0:
+        # Step-by-step forensic logging
+        if i < 40 or (i + 1) % 50 == 0:
             mem = psutil.virtual_memory().used / (1024**3)
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={cur_loss_val:.4f}  "
@@ -132,7 +129,6 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
                   f"dir_loss={cur_dir_val:.4f} | "
                   f"RAM={mem:.1f}GB")
             
-            # Phase 4 Lockdown: Synchronize and Force Deep Collection
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
             gc.collect(2)
@@ -165,13 +161,11 @@ def validate(model, loader, criterion, device, use_amp):
         except StopIteration:
             break
 
-        image   = batch[0].to(device, non_blocking=True)
+        image   = batch[0].to("cuda:0", non_blocking=True)
         targets = (
-            batch[0],
-            batch[1].to(device, non_blocking=True),
-            batch[2].to(device, non_blocking=True),
-            batch[3].to(device, non_blocking=True),
-            batch[4]
+            None,
+            batch[1].to("cuda:0", non_blocking=True),
+            batch[2].to("cuda:0", non_blocking=True)
         )
         batch = None
 
@@ -181,7 +175,6 @@ def validate(model, loader, criterion, device, use_amp):
 
         final_preds    = preds[-1]
         v_loss_val     = float(loss_dict["loss_total"])
-        # targets[1] is binary_mask (already on device now)
         v_bin_iou_val  = float(compute_iou(final_preds[0], targets[1]))
         v_dir_val      = float(loss_dict.get('l2_dir', 0.0))
 
@@ -222,11 +215,11 @@ def main():
     model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
     
     # Enable DataParallel for Kaggle 2x GPUs
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        model = torch.nn.DataParallel(model)
-        
-    model.module.count_parameters() if isinstance(model, torch.nn.DataParallel) else model.count_parameters()
+    # Force 1-GPU BASELINE to eliminate DataParallel leaks
+    device = torch.device("cuda:0")
+    model.to(device)
+    print(f"Using {device} (1-GPU Baseline)")
+    model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = NailVTONLoss()

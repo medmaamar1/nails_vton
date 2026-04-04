@@ -100,7 +100,7 @@ class NailVTONLoss(nn.Module):
             p_bin, p_dir = preds
             h, w = p_bin.shape[-2:]
             
-            # Phase 5: targets is (img_t, bin_t, dir_t, n_inst, id)
+            # Phase 6: targets is a 3-tuple (img_t, bin_t, dir_t)
             t_bin, t_dir = targets[1], targets[2]
             
             # Prepare targets for this resolution

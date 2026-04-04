@@ -205,14 +205,12 @@ class NailDataset(Dataset):
         for m in masks_resized:
             m.close()
 
-        # Phase 5 Nuclear Lockdown: Double-clone and return Tuple
-        # 1. image, 2. binary_mask, 3. direction_field, 4. n_instances, 5. image_id
+        # Phase 6 Lockdown: Minimal 3-tensor Tuple (img, bin, dir)
+        # Bypasses all hidden collation caches.
         return (
             img_t.clone().detach(),
             binary_t.clone().detach(),
-            dir_t.clone().detach(),
-            torch.tensor(len(masks_resized), dtype=torch.long),
-            str(image_id)
+            dir_t.clone().detach()
         )
 
     # ── Augmentation ──────────────────────────────────────────────────────────
