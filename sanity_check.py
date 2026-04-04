@@ -79,7 +79,7 @@ if __name__ == "__main__":
     root = args.data_root
     if not root:
         common_paths = [
-            "/kaggle/input/datasets/maamarmohamed/nail-segmentation/train",
+            "/kaggle/input/datasets/almohamed132/nails-vton/train",
             "c:/Users/OrdiOne/Desktop/douccana marketplace - Copy/nails_vton/train"
         ]
         for p in common_paths:

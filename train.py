@@ -27,7 +27,11 @@ from losses  import NailVTONLoss, compute_iou
 
 def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
-    p.add_argument("--data_root",   default="/kaggle/input/datasets/maamarmohamed/nail-segmentation/train")
+    common_paths = [
+        "/kaggle/input/datasets/almohamed132/nails-vton/train",
+        "c:/Users/OrdiOne/Desktop/douccana marketplace - Copy/nails_vton/train"
+    ]
+    p.add_argument("--data_root",   default=common_paths[0])
     p.add_argument("--epochs",      type=int,   default=100)
     p.add_argument("--batch_size",  type=int,   default=32)
     p.add_argument("--lr",          type=float, default=1e-3)
