@@ -68,18 +68,24 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
     n_batches      = len(loader)
     loader_iter    = iter(loader)
     for i in range(n_batches):
+        # Phase 5 Nuclear: Recycle iterator every 50 steps to purge zombie refs
+        if i > 0 and i % 50 == 0:
+            del loader_iter
+            gc.collect(2)
+            torch.cuda.empty_cache()
+            # Recreate iterator and skip completed batches
+            loader_iter = iter(loader)
+            for _ in range(i): next(loader_iter)
+
         try:
             batch = next(loader_iter)
         except StopIteration:
             break
 
-        image   = batch["image"].to(device, non_blocking=True)
-        targets = {
-            "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
-            "direction_field": batch["direction_field"].to(device, non_blocking=True),
-        }
-        batch = None # Phase 4: Explicitly nullify CPU batch immediately
-
+        # Phase 5: targets is now a Tuple (img, bin, dir, n, id)
+        image   = batch[0].to(device, non_blocking=True)
+        targets = batch # tuple
+        
         optimizer.zero_grad(set_to_none=True)
 
         with autocast("cuda", enabled=use_amp):
@@ -99,7 +105,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
         # Pull final level for metrics
         final_preds = preds[-1]
-        bin_iou     = float(compute_iou(final_preds[0].detach(), targets["binary_mask"]))
+        # targets[1] is binary_mask
+        bin_iou     = float(compute_iou(final_preds[0].detach(), batch[1].to(device, non_blocking=True)))
         
         cur_loss_val = float(loss_dict["loss_total"])
         cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
@@ -150,12 +157,8 @@ def validate(model, loader, criterion, device, use_amp):
         except StopIteration:
             break
 
-        image   = batch["image"].to(device, non_blocking=True)
-        targets = {
-            "binary_mask"    : batch["binary_mask"].to(device,     non_blocking=True),
-            "direction_field": batch["direction_field"].to(device, non_blocking=True),
-        }
-        batch = None
+        image   = batch[0].to(device, non_blocking=True)
+        targets = batch
 
         with autocast("cuda", enabled=use_amp):
             preds = model(image)
@@ -163,7 +166,8 @@ def validate(model, loader, criterion, device, use_amp):
 
         final_preds    = preds[-1]
         v_loss_val     = float(loss_dict["loss_total"])
-        v_bin_iou_val  = float(compute_iou(final_preds[0], targets["binary_mask"]))
+        # batch[1] is binary_mask
+        v_bin_iou_val  = float(compute_iou(final_preds[0], batch[1].to(device, non_blocking=True)))
         v_dir_val      = float(loss_dict.get('l2_dir', 0.0))
 
         total_loss     += v_loss_val

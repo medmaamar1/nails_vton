@@ -205,13 +205,15 @@ class NailDataset(Dataset):
         for m in masks_resized:
             m.close()
 
-        return {
-            "image"          : img_t,                          # (3,  H, W)
-            "binary_mask"    : binary_t,                       # (1,  H, W)
-            "direction_field": dir_t,                          # (2,  H, W)
-            "n_instances"    : torch.tensor(len(masks_resized), dtype=torch.long),
-            "image_id"       : image_id,
-        }
+        # Phase 5 Nuclear Lockdown: Double-clone and return Tuple
+        # 1. image, 2. binary_mask, 3. direction_field, 4. n_instances, 5. image_id
+        return (
+            img_t.clone().detach(),
+            binary_t.clone().detach(),
+            dir_t.clone().detach(),
+            torch.tensor(len(masks_resized), dtype=torch.long),
+            str(image_id)
+        )
 
     # ── Augmentation ──────────────────────────────────────────────────────────
 
@@ -252,11 +254,14 @@ def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_
         )
         print(f"[make_loaders] Auto-split → train={n_train}, val={n_val}")
 
+    # num_workers=2 with persistent_workers=False provides the best memory isolation
+    # as the process heap is destroyed more reliably than the main thread.
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=False,
-                              drop_last=True)
+                              num_workers=2, pin_memory=False,
+                              drop_last=True, persistent_workers=False)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=False)
+                              num_workers=2, pin_memory=False,
+                              persistent_workers=False)
     return train_loader, val_loader
 
 

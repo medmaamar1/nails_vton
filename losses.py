@@ -76,12 +76,12 @@ class NailVTONLoss(nn.Module):
         self.binary_loss    = BinarySegLoss(keep_ratio=lmp_ratio)
         self.direction_loss = DirectionLoss()
 
-    def _get_target_level(self, targets, size):
+    def _get_target_level(self, t_bin, t_dir, size):
         """Linearly interpolate targets to match the scale of the pyramid level."""
         H, W = size
-        bin_t  = F.interpolate(targets["binary_mask"], size=(H, W), mode="nearest")
+        bin_t  = F.interpolate(t_bin, size=(H, W), mode="nearest")
         # Direction field is float32 vectors, should use bilinear interpolation
-        dir_t  = F.interpolate(targets["direction_field"], size=(H, W), mode="bilinear", align_corners=False)
+        dir_t  = F.interpolate(t_dir, size=(H, W), mode="bilinear", align_corners=False)
         
         # Norm dir_t after interpolation using broadcasting
         norm  = dir_t.norm(dim=1, keepdim=True)
@@ -100,8 +100,11 @@ class NailVTONLoss(nn.Module):
             p_bin, p_dir = preds
             h, w = p_bin.shape[-2:]
             
+            # Phase 5: targets is (img_t, bin_t, dir_t, n_inst, id)
+            t_bin, t_dir = targets[1], targets[2]
+            
             # Prepare targets for this resolution
-            target_lvl = self._get_target_level(targets, (h, w))
+            target_lvl = self._get_target_level(t_bin, t_dir, (h, w))
             valid_mask = target_lvl["binary_mask"]  # Foreground mask
             
             l_bin  = self.binary_loss(p_bin, target_lvl["binary_mask"])
