@@ -10,6 +10,7 @@ Produces per-image:
 """
 
 import json
+import os
 import math
 import random
 import numpy as np
@@ -71,10 +72,16 @@ def compute_direction_field(mask_np, bbox):
 # ── Dataset ────────────────────────────────────────────────────────────────────
 
 class NailDataset(Dataset):
-    def __init__(self, root, augment=False, image_size=IMAGE_SIZE, json_path=None):
+    def __init__(self, root, augment=False, image_size=IMAGE_SIZE, json_path=None, orientation_path=None):
         self.root       = Path(root)
         self.augment    = augment
         self.image_size = image_size
+
+        self.orientations = {}
+        if orientation_path and os.path.exists(orientation_path):
+            with open(orientation_path, "r", encoding='utf-8') as f:
+                self.orientations = json.load(f)
+            print(f"[NailDataset] Loaded orientations from {orientation_path}")
 
         # Zero-overhead path lookup instead of rglob scanning
         if json_path is not None:
@@ -83,16 +90,26 @@ class NailDataset(Dataset):
         else:
             ann_path = str(self.root / "_annotations.coco.json")
 
-        import os
         with open(ann_path, "r", encoding='utf-8') as f:
             coco = json.load(f)
 
         self.id_to_anns = {}
         for ann in coco["annotations"]:
             aid = ann["image_id"]
+            
+            # STRICT FILTER: only keep annotations that have a matching orientation
+            aid_str = str(aid)
+            ann_id_str = str(ann.get("id", ""))
+            
+            if aid_str not in self.orientations:
+                continue
+            if ann_id_str not in self.orientations[aid_str]:
+                continue
+
             self.id_to_anns.setdefault(aid, [])
-            # Forensic memory reduction: only keep segmentation points and bbox
+            # Forensic memory reduction: only keep segmentation points, bbox, and id
             self.id_to_anns[aid].append({
+                "id": ann.get("id"),
                 "segmentation": ann.get("segmentation", []),
                 "bbox": ann.get("bbox", [0,0,0,0])
             })
@@ -109,7 +126,11 @@ class NailDataset(Dataset):
             iid   = img["id"]
             fname = img["file_name"]
             
-            # Skip if no annotations
+            # STRICT FILTER: Skip if this image wasn't found in mp_orientations
+            if str(iid) not in self.orientations:
+                continue
+
+            # Skip if no valid annotations left after orientation filtering
             if iid not in self.id_to_anns or not self.id_to_anns[iid]:
                 continue
 
@@ -207,7 +228,7 @@ class NailDataset(Dataset):
                 vector_field[1, mask_np > 0] = dy
                 dir_np += vector_field
             else:
-                dir_np += compute_direction_field(mask_np, bbox)
+                pass # Strict compliance: do not default to geometry
 
         # Re-normalise pixels touched by >1 nail (overlap edge case)
         norm  = np.sqrt(dir_np[0] ** 2 + dir_np[1] ** 2)
