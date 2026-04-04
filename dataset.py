@@ -176,6 +176,7 @@ class NailDataset(Dataset):
         sy = self.image_size / orig_h
         image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
 
+        masks_resized  = []
         bboxes_resized = []
         for m, (x, y, w, h) in zip(masks_pil, bboxes_orig):
             m_resized = m.resize((self.image_size, self.image_size), Image.NEAREST)
