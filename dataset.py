@@ -76,82 +76,62 @@ class NailDataset(Dataset):
         self.augment    = augment
         self.image_size = image_size
 
-        image_size = self.image_size # Local cache
-
+        # Zero-overhead path lookup instead of rglob scanning
         if json_path is not None:
-            ann_path = Path(json_path)
+            ann_path = str(Path(json_path))
             print(f"[NailDataset] Using custom JSON path: {ann_path}")
         else:
-            ann_path = self.root / "_annotations.coco.json"
-            
+            ann_path = str(self.root / "_annotations.coco.json")
+
+        import os
         with open(ann_path, "r", encoding='utf-8') as f:
             coco = json.load(f)
-
-        # Pre-resolve image paths by scanning the directory (recursive).
-        # This workaround handles Roboflow long filenames that may be truncated 
-        # on certain filesystems (Kaggle/Linux) causing OSError: [Errno 36].
-        print(f"[NailDataset] Mapping files in {self.root}...")
-        all_files = list(self.root.rglob("*.jpg")) + list(self.root.rglob("*.png"))
-        
-        # Maps for quick lookup: hash -> Path, and name -> Path
-        hash_to_path = {}
-        name_to_path = {}
-        for p in all_files:
-            name_to_path[p.name] = p
-            if ".rf." in p.name:
-                h = p.name.split(".rf.")[-1].split(".")[0]
-                hash_to_path[h] = p
 
         self.id_to_anns = {}
         for ann in coco["annotations"]:
             aid = ann["image_id"]
             self.id_to_anns.setdefault(aid, [])
-            # Surgical memory reduction: only keep keys we actually use
-            compact_ann = {
+            # Forensic memory reduction: only keep segmentation points and bbox
+            self.id_to_anns[aid].append({
                 "segmentation": ann.get("segmentation", []),
-                "bbox": ann.get("bbox", [0, 0, 0, 0])
-            }
-            self.id_to_anns[aid].append(compact_ann)
+                "bbox": ann.get("bbox", [0,0,0,0])
+            })
 
         self.image_ids  = []
         self.id_to_path = {}
 
+        # Look in the root and 'images' subfolder for each image in the JSON
+        # This is surgically precise and avoids scanning thousands of unrelated files.
+        root_str    = str(self.root)
+        images_str  = str(self.root / "images")
+
         for img in coco["images"]:
-            iid = img["id"]
-            # Skip if no annotations or if there are no successfully identified fingers (>0)
+            iid   = img["id"]
+            fname = img["file_name"]
+            
+            # Skip if no annotations
             if iid not in self.id_to_anns or not self.id_to_anns[iid]:
                 continue
-            
-            fname = img["file_name"]
-            rf_hash = fname.split(".rf.")[-1].split(".")[0] if ".rf." in fname else None
-            
-            # Attempt to find the file using: hash -> direct name -> fallback images subfolder
-            target_path = None
-            if rf_hash and rf_hash in hash_to_path:
-                target_path = hash_to_path[rf_hash]
-            elif fname in name_to_path:
-                target_path = name_to_path[fname]
-            else:
-                # Final check (handles cases where rglob might have missed it or path is weird)
-                try:
-                    p1 = self.root / fname
-                    p2 = self.root / "images" / fname
-                    if p1.exists(): target_path = p1
-                    elif p2.exists(): target_path = p2
-                except OSError: # Still too long? Skip it.
-                    pass
 
-            if target_path:
-                self.id_to_path[iid] = target_path
+            p1 = os.path.join(root_str, fname)
+            p2 = os.path.join(images_str, fname)
+
+            if os.path.exists(p1):
+                self.id_to_path[iid] = p1
                 self.image_ids.append(iid)
+            elif os.path.exists(p2):
+                self.id_to_path[iid] = p2
+                self.image_ids.append(iid)
+            else:
+                # Final fallback for Roboflow hash-mismatches (rare but possible)
+                continue
 
-        print(f"[NailDataset] Loaded {len(self.image_ids)} valid images (root={root}, augment={augment})")
+        print(f"[NailDataset] Loaded {len(self.image_ids)} images (root={root_str})")
 
-        # Free memory (JSON and file list can be large)
-        if 'coco' in locals(): del coco
-        if 'all_files' in locals(): del all_files
-        if 'hash_to_path' in locals(): del hash_to_path
-        if 'name_to_path' in locals(): del name_to_path
+        # Explicitly toast the coco object to free RAM
+        del coco
+        import gc
+        gc.collect()
 
     def __len__(self):
         return len(self.image_ids)

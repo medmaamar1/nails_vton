@@ -108,9 +108,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         total_bin_iou  += bin_iou
         total_dir_loss += cur_dir_val
 
-        if (i + 1) % 50 == 0:
+        if (i + 1) % 50 == 0 or i < 100:
             mem = psutil.virtual_memory().used / (1024**3)
-            l_dir_now = loss_dict.get('l2_dir', 0.0)
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={cur_loss_val:.4f}  "
                   f"bin_iou={bin_iou:.4f}  "
@@ -118,8 +117,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
                   f"RAM={mem:.1f}GB")
             
             # Frequent small flush to prevent pile-up
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
-            import gc
             gc.collect()
 
         # Aggressively delete everything from the GPU/RAM
