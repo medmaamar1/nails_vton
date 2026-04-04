@@ -22,7 +22,7 @@ from torch.amp import GradScaler, autocast
 sys.path.insert(0, str(Path(__file__).parent))
 from dataset import make_loaders
 from model   import NailVTONModel
-from losses  import NailVTONLoss, compute_iou, compute_instance_iou
+from losses  import NailVTONLoss, compute_iou
 
 
 # ── Args ───────────────────────────────────────────────────────────────────────
