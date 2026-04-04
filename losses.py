@@ -129,9 +129,21 @@ class NailVTONLoss(nn.Module):
             
             l_bin    = self.binary_loss(p_bin, target_lvl["binary_mask"])
             l_finger = self.finger_loss(p_finger, target_lvl["finger_mask"])
-            l_dir    = self.direction_loss(p_dir, target_lvl["direction_field"], valid_mask)
             
-            l_lvl = l_bin + l_dir + 0.5 * l_finger
+            # Equation 2: Mean over FOREGROUND pixels only
+            # (|P| in the paper is the number of fingernail pixels)
+            B, C, H, W = p_dir.shape
+            diff  = p_dir - target_lvl["direction_field"]
+            l2_sq = (diff ** 2).sum(dim=1)
+            valid_area = (valid_mask.squeeze(1) > 0.5).float()
+            
+            # Sum of squared errors in nail area
+            total_sq_err = (l2_sq * valid_area).sum()
+            # Mean error over nail pixels (with eps to prevent div by zero)
+            l_dir = total_sq_err / (valid_area.sum() + 1e-6)
+            
+            # Section 3.3: L = L_seg + lambda*L_dir + gamma*L_cl where lambda=gamma=1.0
+            l_lvl = l_bin + l_dir + l_finger
             total_loss += l_lvl
             
             # Phase 4 Lockdown: Explicitly detach and copy to CPU item
