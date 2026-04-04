@@ -82,9 +82,17 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         except StopIteration:
             break
 
-        # Phase 5: targets is now a Tuple (img, bin, dir, n, id)
+        # Phase 5: batch is now a Tuple (img, bin, dir, n, id)
+        # Move tensors to device (indices 1, 2, 3)
         image   = batch[0].to(device, non_blocking=True)
-        targets = batch # tuple
+        targets = (
+            batch[0], # placeholder (not used as target)
+            batch[1].to(device, non_blocking=True), # binary_mask
+            batch[2].to(device, non_blocking=True), # direction_field
+            batch[3].to(device, non_blocking=True), # n_instances
+            batch[4] # image_id (string)
+        )
+        batch = None # Phase 4: Explicitly nullify CPU batch immediately
         
         optimizer.zero_grad(set_to_none=True)
 
@@ -105,8 +113,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
         # Pull final level for metrics
         final_preds = preds[-1]
-        # targets[1] is binary_mask
-        bin_iou     = float(compute_iou(final_preds[0].detach(), batch[1].to(device, non_blocking=True)))
+        # targets[1] is binary_mask (already on device now)
+        bin_iou     = float(compute_iou(final_preds[0].detach(), targets[1]))
         
         cur_loss_val = float(loss_dict["loss_total"])
         cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
@@ -158,7 +166,14 @@ def validate(model, loader, criterion, device, use_amp):
             break
 
         image   = batch[0].to(device, non_blocking=True)
-        targets = batch
+        targets = (
+            batch[0],
+            batch[1].to(device, non_blocking=True),
+            batch[2].to(device, non_blocking=True),
+            batch[3].to(device, non_blocking=True),
+            batch[4]
+        )
+        batch = None
 
         with autocast("cuda", enabled=use_amp):
             preds = model(image)
@@ -166,8 +181,8 @@ def validate(model, loader, criterion, device, use_amp):
 
         final_preds    = preds[-1]
         v_loss_val     = float(loss_dict["loss_total"])
-        # batch[1] is binary_mask
-        v_bin_iou_val  = float(compute_iou(final_preds[0], batch[1].to(device, non_blocking=True)))
+        # targets[1] is binary_mask (already on device now)
+        v_bin_iou_val  = float(compute_iou(final_preds[0], targets[1]))
         v_dir_val      = float(loss_dict.get('l2_dir', 0.0))
 
         total_loss     += v_loss_val
