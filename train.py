@@ -91,11 +91,11 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
         # Phase 6: targets is now a 3-tuple (img, bin, dir)
         # BARE MINIMUM GPU TRANSFER
-        image   = batch[0].to("cuda:0", non_blocking=True)
+        image   = batch[0].to(device, non_blocking=True)
         targets = (
             None, # placeholder for img
-            batch[1].to("cuda:0", non_blocking=True), # binary_mask
-            batch[2].to("cuda:0", non_blocking=True)  # direction_field
+            batch[1].to(device, non_blocking=True), # binary_mask
+            batch[2].to(device, non_blocking=True)  # direction_field
         )
         batch = None # Kill CPU batch immediately
 
@@ -171,11 +171,11 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
         except StopIteration:
             break
 
-        image   = batch[0].to("cuda:0", non_blocking=True)
+        image   = batch[0].to(device, non_blocking=True)
         targets = (
             None,
-            batch[1].to("cuda:0", non_blocking=True),
-            batch[2].to("cuda:0", non_blocking=True)
+            batch[1].to(device, non_blocking=True),
+            batch[2].to(device, non_blocking=True)
         )
         batch = None
 
@@ -253,11 +253,16 @@ def main():
     model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
     
     # Enable DataParallel for Kaggle 2x GPUs
-    # Force 1-GPU BASELINE to eliminate DataParallel leaks
-    device = torch.device("cuda:0")
-    model.to(device)
-    print(f"Using {device} (1-GPU Baseline)")
-    model.count_parameters()
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel!")
+        model = torch.nn.DataParallel(model)
+    else:
+        print(f"Using {device}")
+        
+    if hasattr(model, 'module'):
+        model.module.count_parameters()
+    else:
+        model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = NailVTONLoss()
