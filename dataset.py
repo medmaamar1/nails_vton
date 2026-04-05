@@ -171,42 +171,49 @@ class NailDataset(Dataset):
                 grad = np.linspace(0, 1, h).reshape(h, 1, 1)
                 img_np = img_np * (1 - mask_3d * a * grad) + (color * mask_3d * a * grad)
 
-        # ── Step 2: Sequential Art Overlays (Stars, Rects, Stripes) ──────────
+        # ── Step 2: High-Density Art Overlays (Glitter, Dots, Rects, Stripes) ──
         if random.random() > 0.2:
-            num_designs = random.randint(2, 6)
+            num_designs = random.randint(5, 15) # High density
             for _ in range(num_designs):
-                dtype = random.choice(["rect", "star", "stripe"])
+                dtype = random.choice(["rect", "star", "stripe", "circle"])
                 color = np.random.randint(0, 256, (3,))
-                a     = random.uniform(0.6, 0.95) # Stickers are usually fairly opaque
+                a     = random.uniform(0.6, 0.95)
                 
-                # Create a specific mask for this one design piece
                 s_mask = np.zeros((h, w, 1))
                 
                 if dtype == "rect":
-                    rw, rh = random.randint(15, 45), random.randint(15, 45)
+                    rw, rh = random.randint(5, 15), random.randint(5, 15) # Smaller
                     ry, rx = random.randint(0, h-rh), random.randint(0, w-rw)
                     s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
+                
+                elif dtype == "circle":
+                    radius = random.randint(3, 8)
+                    ry, rx = random.randint(0, h), random.randint(0, w)
+                    yy, xx = np.ogrid[:h, :w]
+                    dist = (yy - ry)**2 + (xx - rx)**2
+                    s_mask = (dist <= radius**2).astype(float)
+                    s_mask = np.expand_dims(s_mask, -1)
                 
                 elif dtype == "stripe":
                     angle = random.uniform(0, np.pi)
                     cos_a, sin_a = np.cos(angle), np.sin(angle)
-                    thick = random.randint(3, 8)
+                    thick = random.randint(2, 4)
                     yy, xx = np.ogrid[:h, :w]
                     proj = xx * cos_a + yy * sin_a
                     s_mask = (np.abs(proj - random.randint(0, h+w)) < thick).astype(float)
                     s_mask = np.expand_dims(s_mask, -1)
 
                 elif dtype == "star":
-                    # Simulated star using 3 overlapping thin rects at different angles
-                    ry, rx = random.randint(10, h-10), random.randint(10, w-10)
-                    size = random.randint(8, 16)
-                    s_mask[ry-size:ry+size, rx-2:rx+2, :] = 1.0
-                    s_mask[ry-2:ry+2, rx-size:rx+size, :] = 1.0
+                    ry, rx = random.randint(5, h-5), random.randint(5, w-5)
+                    size = random.randint(5, 10)
+                    s_mask[ry-size:ry+size, rx-1:rx+1, :] = 1.0
+                    s_mask[ry-1:ry+1, rx-size:rx+size, :] = 1.0
 
-                # Bake this design piece ON TOP of the current img_np
-                # But only where the actual nail exists
+                # Bake ON TOP
                 final_piece_mask = s_mask * mask_3d * a
                 img_np = img_np * (1 - final_piece_mask) + (color * final_piece_mask)
+        
+        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
         
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
