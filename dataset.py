@@ -72,7 +72,7 @@ def compute_direction_field(mask_np, bbox):
 # ── Dataset ────────────────────────────────────────────────────────────────────
 
 class NailDataset(Dataset):
-    def __init__(self, root, augment=False, image_size=IMAGE_SIZE, json_path=None, orientation_path=None):
+    def __init__(self, root, augment=False, image_size=IMAGE_SIZE, json_path=None, orientation_path=None, subset_ids=None):
         self.root       = Path(root)
         self.augment    = augment
         self.image_size = image_size
@@ -107,10 +107,9 @@ class NailDataset(Dataset):
                 continue
 
             self.id_to_anns.setdefault(aid, [])
-            # Forensic memory reduction: only keep segmentation points, bbox, id, and category_id
+            # Forensic memory reduction: only keep segmentation points, bbox, and id
             self.id_to_anns[aid].append({
                 "id": ann.get("id"),
-                "category_id": ann.get("category_id", 0),  # 1-5 for fingers, 0 is background
                 "segmentation": ann.get("segmentation", []),
                 "bbox": ann.get("bbox", [0,0,0,0])
             })
@@ -126,9 +125,13 @@ class NailDataset(Dataset):
         for img in coco["images"]:
             iid   = img["id"]
             fname = img["file_name"]
-
+            
             # STRICT FILTER: Skip if this image wasn't found in mp_orientations
             if str(iid) not in self.orientations:
+                continue
+
+            # SUBSET FILTER: Skip if not in the requested subset (for subject-aware split)
+            if subset_ids is not None and iid not in subset_ids:
                 continue
 
             # Skip if no valid annotations left after orientation filtering
@@ -195,9 +198,9 @@ class NailDataset(Dataset):
         del masks_pil
 
         # ── Augmentation ──────────────────────────────────────────────────────
-        flip_h, flip_v = False, False
+        h_flipped, v_flipped = False, False
         if self.augment:
-            image, masks_resized, flip_h, flip_v = self._augment(image, masks_resized)
+            image, masks_resized, h_flipped, v_flipped = self._augment(image, masks_resized)
 
         # ── Image tensor ──────────────────────────────────────────────────────
         img_t = TF.normalize(TF.to_tensor(image), MEAN, STD)  # (3, H, W)
@@ -210,9 +213,6 @@ class NailDataset(Dataset):
             binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
         binary_t = torch.from_numpy(binary_np).clone().unsqueeze(0)   # (1, H, W)
 
-        # ── Finger Mask (6-class) ─────────────────────────────────────────────
-        finger_np = np.zeros((S, S), dtype=np.int64)
-
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
         
@@ -223,18 +223,14 @@ class NailDataset(Dataset):
             mask_np = np.array(m, dtype=np.uint8)
             ann_id_str = str(ann.get("id", ""))
             
-            # Fill finger class mask
-            cat_id = ann.get("category_id", 0)
-            finger_np[mask_np > 0] = cat_id
-
             if ann_id_str in img_orientations:
                 # Use ground-truth orientation [dx, dy]
                 dx, dy = img_orientations[ann_id_str]
                 
-                # Invert vector direction if image was flipped!
-                if flip_h:
+                # Adjust orientation if spatial augmentations were applied
+                if h_flipped:
                     dx = -dx
-                if flip_v:
+                if v_flipped:
                     dy = -dy
                 
                 # Create a uniform directional vector for the foreground area
@@ -242,8 +238,8 @@ class NailDataset(Dataset):
                 vector_field[0, mask_np > 0] = dx
                 vector_field[1, mask_np > 0] = dy
                 dir_np += vector_field
-
-        finger_t = torch.from_numpy(finger_np).clone()
+            else:
+                pass # Strict compliance: do not default to geometry
 
         # Re-normalise pixels touched by >1 nail (overlap edge case)
         norm  = np.sqrt(dir_np[0] ** 2 + dir_np[1] ** 2)
@@ -257,86 +253,81 @@ class NailDataset(Dataset):
         for m in masks_resized:
             m.close()
 
-        # Phase 7 Lockdown: Minimal 4-tensor Tuple (img, bin, finger, dir)
+        # Phase 6 Lockdown: Minimal 3-tensor Tuple (img, bin, dir)
         # Bypasses all hidden collation caches.
         return (
             img_t.clone().detach(),
             binary_t.clone().detach(),
-            finger_t.clone().detach(),
             dir_t.clone().detach()
         )
 
     # ── Augmentation ──────────────────────────────────────────────────────────
 
     def _augment(self, image, masks):
-        flip_h = random.random() > 0.5
-        flip_v = random.random() > 0.5
-        
-        if flip_h:
+        h_flipped = False
+        v_flipped = False
+        if random.random() > 0.5:
             image = TF.hflip(image)
             masks = [TF.hflip(m) for m in masks]
-        if flip_v:
+            h_flipped = True
+        if random.random() > 0.5:
             image = TF.vflip(image)
             masks = [TF.vflip(m) for m in masks]
-            
+            v_flipped = True
         image = TF.adjust_brightness(image, 1 + random.uniform(-0.2,  0.2))
         image = TF.adjust_contrast(image,   1 + random.uniform(-0.2,  0.2))
         image = TF.adjust_saturation(image, 1 + random.uniform(-0.3,  0.3))
         image = TF.adjust_hue(image,            random.uniform(-0.05, 0.05))
-        return image, masks, flip_h, flip_v
+        return image, masks, h_flipped, v_flipped
 
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
 
 def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_path=None, orientation_path=None):
     root = Path(dataset_root)
-    
-    # If standard 'train' subfolder exists, use it; otherwise use the root itself.
-    # This prevents path doubling like /kaggle/.../train/train/_annotations...
     train_root = root / "train" if (root / "train").exists() else root
     valid_root = root / "valid"
 
-    train_ds = NailDataset(train_root, augment=True, json_path=json_path, orientation_path=orientation_path)
+    # 1. Subject-Aware Split logic
+    ann_path = json_path if json_path else str(train_root / "_annotations.coco.json")
+    with open(ann_path, "r", encoding='utf-8') as f:
+        coco = json.load(f)
+
+    # Group images by subject ID (filename prefix before roboflow hash)
+    subject_to_ids = {}
+    for img in coco["images"]:
+        fname = img["file_name"]
+        # Roboflow format: SubjectName_jpg.rf.hash.jpg or similar
+        # We take the part before '.rf.' as the subject identifier
+        subject_id = fname.split('.rf.')[0] if '.rf.' in fname else fname.rsplit('.', 1)[0]
+        subject_to_ids.setdefault(subject_id, []).append(img["id"])
+
+    subjects = sorted(list(subject_to_ids.keys()))
+    random.Random(42).shuffle(subjects)
+    
+    n_val_subs = int(len(subjects) * val_split)
+    val_subjects = set(subjects[:n_val_subs])
+    train_subjects = set(subjects[n_val_subs:])
+
+    train_ids = []
+    for s in train_subjects: train_ids.extend(subject_to_ids[s])
+    val_ids = []
+    for s in val_subjects: val_ids.extend(subject_to_ids[s])
+
+    print(f"[make_loaders] Subject-Aware Split: {len(train_subjects)} training subjects ({len(train_ids)} imgs), "
+          f"{len(val_subjects)} validation subjects ({len(val_ids)} imgs)")
+
+    train_ds = NailDataset(train_root, augment=True, json_path=json_path, 
+                           orientation_path=orientation_path, subset_ids=set(train_ids))
 
     if valid_root.exists():
-        val_ds = NailDataset(valid_root, augment=False, json_path=json_path, orientation_path=orientation_path)
+        # If a valid folder exists, we assume it's already pre-split or we split it too
+        val_ds = NailDataset(valid_root, augment=False, json_path=json_path, 
+                             orientation_path=orientation_path)
     else:
-        # Subject-aware split based on filename prefix before '.rf.' or matching similar augmented structures
-        from collections import defaultdict
-        
-        # Group by base prefix to avoid data leakage (e.g. 'Hand_0005180')
-        prefix_to_ids = defaultdict(list)
-        for iid in train_ds.image_ids:
-            fname = train_ds.id_to_path[iid].split(os.sep)[-1]
-            base_prefix = fname.split('.rf.')[0] if '.rf.' in fname else fname.split('.')[0]
-            prefix_to_ids[base_prefix].append(iid)
-            
-        prefixes = list(prefix_to_ids.keys())
-        random.seed(42)
-        random.shuffle(prefixes)
-        
-        n_prefixes_val = int(len(prefixes) * val_split)
-        val_prefixes = set(prefixes[:n_prefixes_val])
-        
-        train_indices = []
-        val_indices = []
-        for i, iid in enumerate(train_ds.image_ids):
-            fname = train_ds.id_to_path[iid].split(os.sep)[-1]
-            base_prefix = fname.split('.rf.')[0] if '.rf.' in fname else fname.split('.')[0]
-            if base_prefix in val_prefixes:
-                val_indices.append(i)
-            else:
-                train_indices.append(i)
-                
-        train_ds_split = torch.utils.data.Subset(train_ds, train_indices)
-        val_ds_split = torch.utils.data.Subset(NailDataset(train_root, augment=False, json_path=json_path, orientation_path=orientation_path), val_indices)
-        
-        train_ds = train_ds_split
-        val_ds = val_ds_split
-        print(f"[make_loaders] Subject-aware Auto-split → train={len(train_indices)}, val={len(val_indices)}")
+        val_ds = NailDataset(train_root, augment=False, json_path=json_path, 
+                             orientation_path=orientation_path, subset_ids=set(val_ids))
 
-    # num_workers=2 with persistent_workers=False provides the best memory isolation
-    # as the process heap is destroyed more reliably than the main thread.
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=2, pin_memory=False,
                               drop_last=True, persistent_workers=False)
@@ -355,8 +346,8 @@ if __name__ == "__main__":
     sample = ds[0]
 
     print("image          :", sample["image"].shape,           sample["image"].dtype)
-    print("binary_mask    :", sample[1].shape,     sample[1].max().item())
-    print("finger_mask    :", sample[2].shape,     sample[2].max().item())
-    print("direction_field:", sample[3].shape,     sample[3].abs().max().item())
+    print("binary_mask    :", sample["binary_mask"].shape,     sample["binary_mask"].max().item())
+    print("direction_field:", sample["direction_field"].shape, sample["direction_field"].abs().max().item())
+    print("n_instances    :", sample["n_instances"].item())
     print("image_id       :", sample["image_id"])
     print("\nDataset sanity check PASSED ✓")

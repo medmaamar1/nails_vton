@@ -53,21 +53,9 @@ class DirectionLoss(nn.Module):
         valid_sq = (valid_mask.squeeze(1) > 0.5).float()
         l2_sq_masked = l2_sq * valid_sq
         
-        # We sum over all FOREGROUND pixels and divide by the total area B*H*W
+        # Precise Equation 3: 1/(H*W) * sum(||u_pred - u_target||^2)
+        # Penalized only in foreground, but divided by total area (B*H*W).
         return l2_sq_masked.sum() / (B * H * W)
-
-
-# ── Finger Classification Loss ──────────────────────────────────────────────────
-class FingerClassLoss(nn.Module):
-    def forward(self, logits, targets):
-        """
-        logits  : (B, 6, H, W)
-        targets : (B, H, W) long mask (0 to 5)
-        
-        Plain Cross-Entropy over all pixels, no max-pooling.
-        0 corresponds to background.
-        """
-        return F.cross_entropy(logits, targets)
 
 
 # ── Binary Segmentation Loss ──────────────────────────────────────────────────
@@ -92,14 +80,11 @@ class NailVTONLoss(nn.Module):
         super().__init__()
         self.binary_loss    = BinarySegLoss(keep_ratio=lmp_ratio)
         self.direction_loss = DirectionLoss()
-        self.finger_loss    = FingerClassLoss()
 
-    def _get_target_level(self, t_bin, t_finger, t_dir, size):
+    def _get_target_level(self, t_bin, t_dir, size):
         """Linearly interpolate targets to match the scale of the pyramid level."""
         H, W = size
         bin_t  = F.interpolate(t_bin, size=(H, W), mode="nearest")
-        # t_finger is (B, H, W). F.interpolate requires (B, C, H, W)
-        finger_t = F.interpolate(t_finger.float().unsqueeze(1), size=(H, W), mode="nearest").squeeze(1).long()
         # Direction field is float32 vectors, should use bilinear interpolation
         dir_t  = F.interpolate(t_dir, size=(H, W), mode="bilinear", align_corners=False)
         
@@ -107,53 +92,38 @@ class NailVTONLoss(nn.Module):
         norm  = dir_t.norm(dim=1, keepdim=True)
         dir_t = dir_t / norm.clamp(min=1e-6)
 
-        return {"binary_mask": bin_t, "finger_mask": finger_t, "direction_field": dir_t}
+        return {"binary_mask": bin_t, "direction_field": dir_t}
 
     def forward(self, multi_predictions, targets):
         """
-        multi_predictions: list of tuples (binary, finger, direction)
+        multi_predictions: list of tuples (binary, direction)
         """
         total_loss = 0.0
         details = {}
 
         for i, preds in enumerate(multi_predictions):
-            p_bin, p_finger, p_dir = preds
+            p_bin, p_dir = preds
             h, w = p_bin.shape[-2:]
             
-            # Phase 7: targets is a 4-tuple (img_t, bin_t, finger_t, dir_t)
-            t_bin, t_finger, t_dir = targets[1], targets[2], targets[3]
+            # Phase 6: targets is a 3-tuple (img_t, bin_t, dir_t)
+            t_bin, t_dir = targets[1], targets[2]
             
             # Prepare targets for this resolution
-            target_lvl = self._get_target_level(t_bin, t_finger, t_dir, (h, w))
+            target_lvl = self._get_target_level(t_bin, t_dir, (h, w))
             valid_mask = target_lvl["binary_mask"]  # Foreground mask
             
-            l_bin    = self.binary_loss(p_bin, target_lvl["binary_mask"])
-            l_finger = self.finger_loss(p_finger, target_lvl["finger_mask"])
+            l_bin  = self.binary_loss(p_bin, target_lvl["binary_mask"])
+            l_dir  = self.direction_loss(p_dir, target_lvl["direction_field"], valid_mask)
             
-            # Equation 2: Mean over FOREGROUND pixels only
-            # (|P| in the paper is the number of fingernail pixels)
-            B, C, H, W = p_dir.shape
-            diff  = p_dir - target_lvl["direction_field"]
-            l2_sq = (diff ** 2).sum(dim=1)
-            valid_area = (valid_mask.squeeze(1) > 0.5).float()
-            
-            # Sum of squared errors in nail area
-            total_sq_err = (l2_sq * valid_area).sum()
-            # Mean error over nail pixels (with eps to prevent div by zero)
-            l_dir = total_sq_err / (valid_area.sum() + 1e-6)
-            
-            # Section 3.3: L = L_seg + lambda*L_dir + gamma*L_cl where lambda=gamma=1.0
-            l_lvl = l_bin + l_dir + l_finger
+            l_lvl = l_bin + l_dir
             total_loss += l_lvl
             
             # Phase 4 Lockdown: Explicitly detach and copy to CPU item
             details[f"l{i}_total"] = l_lvl.detach().cpu().item()
-            details[f"l_bin_{i}"]  = l_bin.detach().cpu().item()
-            details[f"l_fin_{i}"]  = l_finger.detach().cpu().item()
-            details[f"l_dir_{i}"]  = l_dir.detach().cpu().item()
+            details[f"l_bin_{i}"]   = l_bin.detach().cpu().item()
+            details[f"l_dir_{i}"]   = l_dir.detach().cpu().item()
 
         details["l2_dir"]     = float(sum(details[f"l_dir_{i}"] for i in range(len(multi_predictions))) / len(multi_predictions))
-        details["l_fin"]      = float(sum(details[f"l_fin_{i}"] for i in range(len(multi_predictions))) / len(multi_predictions))
         details["loss_total"] = total_loss.detach().cpu().item()
         return total_loss, details
 
@@ -200,15 +170,11 @@ if __name__ == "__main__":
     
     targets = {
         "binary_mask": (torch.rand(2, 1, 512, 512) > 0.8).float(),
-        "finger_mask": torch.randint(0, 6, (2, 512, 512)),
         "direction_field": torch.randn(2, 2, 512, 512)
     }
     
-    # Pack for dummy criterion run
-    dummy_targets = (None, targets["binary_mask"], targets["finger_mask"], targets["direction_field"])
-    
     criterion = NailVTONLoss()
-    total, logs = criterion(outs, dummy_targets)
+    total, logs = criterion(outs, targets)
     
     print("Loss logs:")
     for k, v in logs.items():

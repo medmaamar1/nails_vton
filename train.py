@@ -83,14 +83,13 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         except StopIteration:
             break
 
-        # Phase 7: targets is now a 4-tuple (img, bin, finger, dir)
+        # Phase 6: targets is now a 3-tuple (img, bin, dir)
         # BARE MINIMUM GPU TRANSFER
         image   = batch[0].to("cuda:0", non_blocking=True)
         targets = (
             None, # placeholder for img
             batch[1].to("cuda:0", non_blocking=True), # binary_mask
-            batch[2].to("cuda:0", non_blocking=True), # finger_mask
-            batch[3].to("cuda:0", non_blocking=True)  # direction_field
+            batch[2].to("cuda:0", non_blocking=True)  # direction_field
         )
         batch = None # Kill CPU batch immediately
 
@@ -118,7 +117,6 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         
         cur_loss_val = float(loss_dict["loss_total"])
         cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
-        cur_fin_val  = float(loss_dict.get('l_fin', 1.0))
 
         total_loss     += cur_loss_val
         total_miou     += miou
@@ -130,8 +128,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={cur_loss_val:.4f}  "
                   f"miou={miou:.4f}  "
-                  f"dir_loss={cur_dir_val:.4f}  "
-                  f"fin_loss={cur_fin_val:.4f} | "
+                  f"dir_loss={cur_dir_val:.4f} | "
                   f"RAM={mem:.1f}GB")
             
             torch.cuda.synchronize()
@@ -170,8 +167,7 @@ def validate(model, loader, criterion, device, use_amp):
         targets = (
             None,
             batch[1].to("cuda:0", non_blocking=True),
-            batch[2].to("cuda:0", non_blocking=True),
-            batch[3].to("cuda:0", non_blocking=True)
+            batch[2].to("cuda:0", non_blocking=True)
         )
         batch = None
 
@@ -218,18 +214,15 @@ def main():
         orientation_path = args.orientation_path
     )
 
-    model = NailVTONModel(image_size=args.image_size, pretrained=True)
+    # ── Model ──────────────────────────────────────────────────────────────────
+    model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
     
     # Enable DataParallel for Kaggle 2x GPUs
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel!")
-        model = torch.nn.DataParallel(model)
-        
-    model = model.to(device)
-    if isinstance(model, torch.nn.DataParallel):
-        model.module.count_parameters()
-    else:
-        model.count_parameters()
+    # Force 1-GPU BASELINE to eliminate DataParallel leaks
+    device = torch.device("cuda:0")
+    model.to(device)
+    print(f"Using {device} (1-GPU Baseline)")
+    model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = NailVTONLoss()

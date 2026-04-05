@@ -81,14 +81,12 @@ class PyramidHeads(nn.Module):
         # Branch from shared features:
         # Fgbg: 1x1 conv to 2 channels (Softmax on 2 classes for background and foreground)
         self.binary    = nn.Conv2d(10, 2, 1)
-        # Finger Class: 6 channels (0=BG, 1..5=Fingers)
-        self.finger    = nn.Conv2d(10, 6, 1)
         # Direction: '1x1 conv 2'
         self.direction = nn.Conv2d(10, 2, 1)
 
     def forward(self, x):
         shared_feat = self.shared(x)
-        return self.binary(shared_feat), self.finger(shared_feat), self.direction(shared_feat)
+        return self.binary(shared_feat), self.direction(shared_feat)
 
 class NailVTONModel(nn.Module):
     def __init__(self, image_size=448, pretrained=True):
@@ -128,29 +126,27 @@ class NailVTONModel(nn.Module):
         # 1. Low-Resolution Fusion (Level 0 side-output)
         # Matches Section 3.2: "fuses H/16 x W/16 features from stage_low4 with upsampled stage_low8"
         f0 = self.fusion_low(feat_low_s8, feat_low_s4)
-        out0_bin, out0_finger, out0_dir = self.head_l0(f0)
+        out0_bin, out0_dir = self.head_l0(f0)
 
         # 2. High-Resolution Fusion (Level 1 side-output)
         # Matches Section 3.2: "fuses resulting features with H/8 x W/8 features from stage_high4"
         f1 = self.fusion_high(f0, feat_high)
-        out1_bin, out1_finger, out1_dir = self.head_l1(f1)
+        out1_bin, out1_dir = self.head_l1(f1)
 
         # 3. Final Output (Upsampled to full resolution)
-        out2_bin, out2_finger, out2_dir = self.head_final(f1)
+        out2_bin, out2_dir = self.head_final(f1)
         
         def _norm_dir(d):
             return d / d.norm(dim=1, keepdim=True).clamp(min=1e-6)
 
-        p0 = (out0_bin, out0_finger, _norm_dir(out0_dir))
-        p1 = (out1_bin, out1_finger, _norm_dir(out1_dir))
+        p0 = (out0_bin, _norm_dir(out0_dir))
+        p1 = (out1_bin, _norm_dir(out1_dir))
         
         final_bin = F.interpolate(out2_bin, size=(self.image_size, self.image_size),
                                   mode="bilinear", align_corners=False)
-        final_finger = F.interpolate(out2_finger, size=(self.image_size, self.image_size),
-                                  mode="bilinear", align_corners=False)
         final_dir = F.interpolate(out2_dir, size=(self.image_size, self.image_size),
                                   mode="bilinear", align_corners=False)
-        pf = (final_bin, final_finger, _norm_dir(final_dir))
+        pf = (final_bin, _norm_dir(final_dir))
 
         return [p0, p1, pf]
 
@@ -158,15 +154,11 @@ class NailVTONModel(nn.Module):
     def predict(self, x, binary_thresh=0.5):
         self.eval()
         multi_preds = self(x)
-        final_bin, final_finger, final_dir = multi_preds[-1]
+        final_bin, final_dir = multi_preds[-1]
         # Binary output is now (B, 2, H, W). Use softmax and take foreground channel (index 1).
         prob_fg = torch.softmax(final_bin, dim=1)[:, 1:2]
-        
-        # Finger is (B, 6, H, W). Use argmax.
-        pred_finger = torch.argmax(final_finger, dim=1, keepdim=True)
         return (
             prob_fg > binary_thresh,
-            pred_finger,
             final_dir,
         )
 
@@ -184,7 +176,7 @@ if __name__ == "__main__":
     outs = model(dummy)
     
     print(f"Laplacian levels: {len(outs)}")
-    for i, (b, f, d) in enumerate(outs):
-        print(f"  Level {i}: bin={b.shape}, finger={f.shape}, dir={d.shape}")
+    for i, (b, d) in enumerate(outs):
+        print(f"  Level {i}: bin={b.shape}, dir={d.shape}")
 
     print("\nModel Architecture Check PASSED")
