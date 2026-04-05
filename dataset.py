@@ -46,7 +46,18 @@ class NailDataset(Dataset):
 
         csv_path = self.base_path / "NailSegmentationV1.csv"
         df = pd.read_csv(csv_path)
-        df = df[df["split"] == split].reset_index(drop=True)
+        df['split'] = df['split'].str.strip().str.lower()
+        
+        # Auto-match 'val', 'valid', or 'validation'
+        if split == "val":
+            mask = df['split'].isin(['val', 'valid', 'validation'])
+        else:
+            mask = df['split'] == split
+            
+        df = df[mask].reset_index(drop=True)
+
+        if len(df) == 0:
+            print(f"[Warning] No samples found for split '{split}'. Unique values in CSV: {list(pd.read_csv(csv_path)['split'].unique())}")
 
         # Store only strings — no PIL, no tensors in __init__
         self.image_paths = [str(self.base_path / row["image_path"]) for _, row in df.iterrows()]

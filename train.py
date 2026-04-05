@@ -155,6 +155,8 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
         logits = None
         loss   = None
 
+    if n_batches == 0:
+        return 0.0, 0.0
     return total_loss / n_batches, total_miou / n_batches
 
 
