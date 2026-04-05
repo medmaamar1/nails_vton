@@ -141,10 +141,16 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.cuda.empty_cache()
             gc.collect(2)
 
-        # Surgical Nullification
+        # Surgical Nullification — must destroy tensors INSIDE tuples explicitly
+        # preds is a list of tuples [(bin0,dir0), (bin1,dir1), (bin2,dir2)]
+        # Setting preds=None only kills the outer list, inner tuple tensors stay alive!
+        if preds is not None:
+            for (b, d) in preds:
+                del b, d
+            del preds
+            preds = None
         image       = None
         targets     = None
-        preds       = None
         loss        = None
         loss_dict   = None
         final_preds = None
