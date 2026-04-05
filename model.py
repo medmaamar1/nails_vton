@@ -2,10 +2,11 @@
 Nail VTON Model
 ---------------
 Strict adherence to VTNFP (Duke et al., 2019):
-  Backbone   : TWO independent MobileNetV2 alpha=1.0 prefixes (no shared weights).
-  Encoder 1 (High-res) : stages 1..4 (1/8 resolution, 32 channels).
-  Encoder 2 (Low-res)  : stages 1..8 (1/16 resolution, 320 channels, surgery applied).
-  Fusion : Cascaded Feature Fusion blocks.
+  Backbone   : TWO independent MobileNetV3-Large prefixes (no shared weights).
+  Encoder 1 (High-res) : features[0:5]  (H/8  resolution, 40 channels).
+  Encoder 2 (Low-res)  : features[0:13] (H/16 resolution, 112 channels, surgery applied).
+                         surgery target: features[13].block.1.0  stride (2,2)->(1,1), dilation 2.
+  Fusion : Cascaded Feature Fusion blocks (CFF) -- unchanged from paper.
   Laplacian Pyramid: Side-outputs at Level 0, Level 1, and Level 2.
 """
 import torch
@@ -43,32 +44,47 @@ class CFF(nn.Module):
                                mode="bilinear", align_corners=False)
         return self.act(self.low_conv(low_up) + self.high_conv(high_feat))
 
-class MobileNetV2Prefix(nn.Module):
-    """Encapsulates a prefix of a MobileNetV2 backbone, optionally returning split features."""
-    def __init__(self, stages_idx, split_idx=None, pretrained=True, surgery=False):
+class MobileNetV3LargePrefix(nn.Module):
+    """
+    Encapsulates a prefix of a MobileNetV3-Large backbone.
+
+    Verified stage indices (probed via forward pass on 224x224 low-res input):
+      features[ 4]: 40ch  @ 28x28 = H/8  of low-res = H/16 of original  <- s4 skip
+      features[ 6]: 40ch  @ 28x28 = H/8  of low-res = H/16 of original  <- split_idx=7
+      features[12]: 112ch @ 14x14 = H/16 of low-res = H/32 of original  <- last before stride-2
+      features[13]: 160ch @  7x7  = H/32 of low-res = surgery target
+      After surgery: features[13] outputs 160ch @ 14x14 = H/16 of original
+    """
+    def __init__(self, split_idx=None, pretrained=True, surgery=False):
         super().__init__()
         self.split_idx = split_idx
-        weights = models.MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None
-        backbone = models.mobilenet_v2(weights=weights)
-        self.features = nn.Sequential(*backbone.features[:max(stages_idx, split_idx or 0)])
-        
+        weights = models.MobileNet_V3_Large_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = models.mobilenet_v3_large(weights=weights)
+
         if surgery:
-            # Low-res path surgery: Stride 32x -> 16x
-            # Standard index 14 has stride 2. Change to 1.
-            if len(self.features) > 14:
-                self.features[14].conv[1][0].stride = (1, 1)
-                for i in range(14, len(self.features)):
-                    self.features[i].conv[1][0].dilation = (2, 2)
-                    self.features[i].conv[1][0].padding = (2, 2)
+            # Include features[0:14] (0 through 13 inclusive).
+            # features[13].block.1.0 is the 5x5 depthwise conv with stride=2.
+            # Surgery: stride 2->1, dilation 1->2, padding 2->4.
+            # After surgery: features[13] outputs 160ch @ H/16 of original (not H/32).
+            self.features = nn.Sequential(*backbone.features[:14])
+            dw = self.features[13].block[1][0]
+            dw.stride   = (1, 1)
+            dw.dilation = (2, 2)
+            dw.padding  = (4, 4)  # dilation*(kernel_size-1)//2 = 2*(5-1)//2 = 4
+        else:
+            # High-res path: only need up to H/8 (features[0:5])
+            self.features = nn.Sequential(*backbone.features[:5])
 
     def forward(self, x):
         if self.split_idx is None:
+            # High-res path: single output
             return self.features(x)
-        
-        # Split features for H/16 skip-connection (Section 3.2)
-        feat_s4 = self.features[:self.split_idx](x)
-        feat_final = self.features[self.split_idx:](feat_s4)
+
+        # Low-res path: split for H/16 skip-connection (Section 3.2)
+        feat_s4    = self.features[:self.split_idx](x)    # 40ch @ H/16 of orig
+        feat_final = self.features[self.split_idx:](feat_s4) # 160ch @ H/16 of orig
         return feat_s4, feat_final
+
 
 class PyramidHeads(nn.Module):
     def __init__(self, in_ch):
@@ -91,28 +107,30 @@ class PyramidHeads(nn.Module):
 class NailVTONModel(nn.Module):
     def __init__(self, image_size=448, pretrained=True):
         super().__init__()
-        self.image_size    = image_size
+        self.image_size = image_size
 
-        # TWO independent encoders (no weight sharing) to match paper's capacity
-        # Level 0 (low-res): Input H/2. Stage 4 is H/16, Stage 8 is H/32 (with surgery).
-        self.encoder_low = MobileNetV2Prefix(stages_idx=18, split_idx=7, pretrained=pretrained, surgery=True)
-        # Level 1 (high-res): Input H. Stage 4 is H/8
-        self.encoder_high = MobileNetV2Prefix(stages_idx=7, pretrained=pretrained, surgery=False)
+        # TWO independent encoders (no weight sharing) — paper Section 3.2
+        # Low-res encoder: receives H/2 input, uses V3-Large features[0:14] with surgery.
+        #   split_idx=7 gives 40ch skip at H/16 of original (s4).
+        #   Remainder (features[7:14] with surgery) gives 160ch at H/16 of orig (s8).
+        self.encoder_low  = MobileNetV3LargePrefix(split_idx=7, pretrained=pretrained, surgery=True)
+        # High-res encoder: receives full H input, uses V3-Large features[0:5].
+        #   Output: 40ch at H/8 of original.
+        self.encoder_high = MobileNetV3LargePrefix(split_idx=None, pretrained=pretrained, surgery=False)
 
-        HIGH_CH = 32
-        LOW_S4_CH = 32
-        LOW_S8_CH  = 320
-        FUSE    = 320
+        HIGH_CH   = 40   # V3-Large features[4] output channels (H/8 of orig)
+        LOW_S4_CH = 40   # V3-Large features[6] output channels (H/16 of orig, skip)
+        LOW_S8_CH = 160  # V3-Large features[13] output channels (H/16 of orig, post-surgery)
+        FUSE      = 320  # CFF output — kept at 320 to preserve paper's decoder capacity
 
-        # Fusion 0: Stage_low4 (H/16) + Upsampled Stage_low8 (H/32 -> H/16)
-        self.fusion_low = CFF(LOW_S8_CH, LOW_S4_CH, FUSE)
-        
-        # Fusion 1: Stage_high4 (H/8) + Upsampled Low_Features (H/16 -> H/8)
+        # Fusion 0: stage_low8 (H/16) fused with stage_low4 (H/16) upsampled
+        self.fusion_low  = CFF(LOW_S8_CH, LOW_S4_CH, FUSE)
+        # Fusion 1: fused low features (H/16->H/8) fused with stage_high (H/8)
         self.fusion_high = CFF(FUSE, HIGH_CH, FUSE)
 
-        # Laplacian Pyramid heads
-        self.head_l0 = PyramidHeads(FUSE)
-        self.head_l1 = PyramidHeads(FUSE)
+        # Laplacian Pyramid heads — identical to paper Figure 2
+        self.head_l0    = PyramidHeads(FUSE)
+        self.head_l1    = PyramidHeads(FUSE)
         self.head_final = PyramidHeads(FUSE)
 
     def forward(self, x):
