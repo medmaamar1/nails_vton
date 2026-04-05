@@ -15,7 +15,7 @@ import math
 import random
 import numpy as np
 from pathlib import Path
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -35,22 +35,21 @@ DATA_ROOT     = "/kaggle/input/datasets/maamarmohamed/nail-segmentation/train"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def polygon_to_mask(polygon, max_dim, offset_x, offset_y, target_size=IMAGE_SIZE):
+def polygon_to_mask(polygons, max_dim, offset_x, offset_y, target_size=IMAGE_SIZE):
     """
     High-Precision Anti-Aliased Masking using 4x Super-Sampling.
-    Prevents 'pixellated' jagged edges by drawing at 1792px then downsampling.
+    Supports multi-part polygons (lists of points).
     """
-    # Supersampling factor 4
     S = target_size * 4 
     mask_large = Image.new("L", (S, S), 0)
+    scale = S / max_dim
     
-    if len(polygon) >= 6:
-        # Scale factor from raw max_dim to 1792 target
-        scale = S / max_dim
-        xy = [((x + offset_x) * scale, (y + offset_y) * scale) for x, y in zip(polygon[::2], polygon[1::2])]
-        ImageDraw.Draw(mask_large).polygon(xy, fill=255)
+    draw = ImageDraw.Draw(mask_large)
+    for poly in polygons:
+        if len(poly) >= 6:
+            xy = [((x + offset_x) * scale, (y + offset_y) * scale) for x, y in zip(poly[::2], poly[1::2])]
+            draw.polygon(xy, fill=255)
     
-    # Bilinear downsampling creates a smooth probability edge at 448x448
     return mask_large.resize((target_size, target_size), Image.BILINEAR)
 
 
@@ -171,27 +170,28 @@ class NailDataset(Dataset):
     def __getitem__(self, idx):
         image_id, img_path, anns = self.image_ids[idx], self.id_to_path[self.image_ids[idx]], self.id_to_anns[self.image_ids[idx]]
 
-        # ── Load and Letterbox Pad ──
+        # ── Load, Auto-Rotate and Letterbox Pad ──
         raw_img = Image.open(img_path).convert("RGB")
+        raw_img = ImageOps.exif_transpose(raw_img) # Fix phone-rotation shift
         raw_img = TF.to_grayscale(raw_img, num_output_channels=3) # Agnostic
         w, h = raw_img.size
         max_dim = max(w, h)
         
-        # Calculate padding to center the image
-        pad_x = (max_dim - w) // 2
-        pad_y = (max_dim - h) // 2
+        # Exact floating-point padding
+        pad_x = (max_dim - w) / 2.0
+        pad_y = (max_dim - h) / 2.0
         
         # Create square canvas
         canvas = Image.new("RGB", (max_dim, max_dim), (0, 0, 0))
-        canvas.paste(raw_img, (pad_x, pad_y))
+        canvas.paste(raw_img, (int(pad_x), int(pad_y))) # PIL paste needs int
         
-        # ── Masks on Square Canvas ──
+        # ── Masks on Square Canvas (Sub-pixel precise) ──
         masks_resized = []
         for ann in anns:
             seg = ann.get("segmentation", [])
-            if not seg or len(seg[0]) < 6: continue
-            # Now uses 4x super-sampling for smooth edges
-            m_anti_aliased = polygon_to_mask(seg[0], max_dim, pad_x, pad_y, self.image_size)
+            if not seg: continue
+            # Handle list of polygons (multi-part nails)
+            m_anti_aliased = polygon_to_mask(seg, max_dim, pad_x, pad_y, self.image_size)
             masks_resized.append(m_anti_aliased)
 
         # Resize square canvas to 448x448
