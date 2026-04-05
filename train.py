@@ -212,6 +212,33 @@ def main():
     use_amp = not args.no_amp and device.type == "cuda"
     print(f"Device: {device}  |  AMP: {use_amp}")
 
+    # ── Path Verification & Auto-Discovery ──────────────────────────────────────
+    if not os.path.exists(args.data_root):
+        print(f"\n[ERROR] DATA ROOT NOT FOUND: {args.data_root}")
+        parent = os.path.dirname(args.data_root)
+        if os.path.exists(parent):
+            print(f"  But parent directory exists! Contents of {parent}:")
+            print(f"  {os.listdir(parent)}\n")
+        raise FileNotFoundError(f"Missing data_root: {args.data_root}")
+
+    if args.orientation_path and not os.path.exists(args.orientation_path):
+        print(f"\n[ERROR] ORIENTATION JSON NOT FOUND: {args.orientation_path}")
+        # The user's new dataset folder might have a different JSON filename.
+        parent = os.path.dirname(args.orientation_path)
+        if os.path.exists(parent):
+            jsons = [f for f in os.listdir(parent) if f.endswith('.json')]
+            print(f"  Parent directory '{parent}' exists!")
+            print(f"  Found these JSON files inside: {jsons}\n")
+            if len(jsons) == 1:
+                # Auto-correction
+                new_path = os.path.join(parent, jsons[0])
+                print(f"  -> AUTO-CORRECTING orientation_path to: {new_path}")
+                args.orientation_path = new_path
+            else:
+                raise FileNotFoundError(f"Missing orientation_path. Found JSONs: {jsons}")
+        else:
+            raise FileNotFoundError(f"Missing orientation_path AND parent directory: {parent}")
+
     # ── Data ───────────────────────────────────────────────────────────────────
     train_loader, val_loader = make_loaders(
         args.data_root,
