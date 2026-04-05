@@ -116,11 +116,10 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-        # Pull final level for metrics
-        final_preds = preds[-1]
-        # targets[1] is binary_mask
-        miou        = float(compute_miou(final_preds[0].detach(), targets[1]))
-        
+        # Compute metrics INLINE — no extra tensor reference stored
+        with torch.no_grad():
+            miou = float(compute_miou(preds[-1][0].detach(), targets[1]))
+
         cur_loss_val = float(loss_dict["loss_total"])
         cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
 
@@ -128,32 +127,34 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         total_miou     += miou
         total_dir_loss += cur_dir_val
 
-        # Step-by-step forensic logging
+        # ── Surgical Nullification (BEFORE logging to ensure GC sees freed tensors) ──
+        # preds = [(bin0,dir0), (bin1,dir1), (bin2,dir2)]
+        # Must destroy each inner tuple explicitly — setting preds=None only kills the list
+        for (b, d) in preds:
+            del b, d
+        del preds
+        preds       = None
+        image       = None
+        targets     = None
+        loss        = None
+        loss_dict   = None
+
+        # Run GC every 10 steps (not just in logging block) to prevent accumulation
+        if (i + 1) % 10 == 0:
+            gc.collect(1)
+
+        # ── Step logging ──────────────────────────────────────────────────────────
         if i < 40 or (i + 1) % 50 == 0:
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            gc.collect(2)
             mem = psutil.virtual_memory().used / (1024**3)
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={cur_loss_val:.4f}  "
                   f"miou={miou:.4f}  "
                   f"dir_loss={cur_dir_val:.4f} | "
                   f"RAM={mem:.1f}GB")
-            
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            gc.collect(2)
 
-        # Surgical Nullification — must destroy tensors INSIDE tuples explicitly
-        # preds is a list of tuples [(bin0,dir0), (bin1,dir1), (bin2,dir2)]
-        # Setting preds=None only kills the outer list, inner tuple tensors stay alive!
-        if preds is not None:
-            for (b, d) in preds:
-                del b, d
-            del preds
-            preds = None
-        image       = None
-        targets     = None
-        loss        = None
-        loss_dict   = None
-        final_preds = None
         if limit is not None and i + 1 >= limit:
             break
 
