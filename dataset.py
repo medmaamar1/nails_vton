@@ -54,7 +54,7 @@ class NailDataset(Dataset):
         # ── 1. Load, Auto-Rotate and Letterbox Pad ──
         raw_img = Image.open(img_path).convert("RGB")
         raw_img = ImageOps.exif_transpose(raw_img) # Fix phone-rotation shifts
-        raw_img = TF.to_grayscale(raw_img, num_output_channels=3) # Agnostic Feature
+        # raw_img = TF.to_grayscale(raw_img, num_output_channels=3) # Agnostic Feature (Disabled)
         
         # Load mask exactly the same way to stay 100% synchronized
         raw_msk = Image.open(msk_path).convert("L")
