@@ -157,24 +157,31 @@ class NailDataset(Dataset):
         img_np = np.array(img).astype(np.float32)
         msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
         
-        # Create a noise pattern
+        # Create a noise pattern (Simulating real manicures: Red/Blue/Dots/French)
         h, w, c = img_np.shape
-        noise_type = random.choice(["gauss", "stripes", "block"])
+        noise_type = random.choice(["gauss", "stripes", "dots", "french", "gradient"])
+        noise = np.zeros((h, w, c))
         
         if noise_type == "gauss":
-            noise = np.random.normal(0, 50, (h, w, c))
+            noise = np.random.normal(0, 70, (h, w, c))
         elif noise_type == "stripes":
-            noise = np.zeros((h, w, c))
-            for x in range(0, w, random.randint(2, 6)):
-                noise[:, x:x+2, :] = random.randint(-100, 100)
-        else: # block
-            noise = np.zeros((h, w, c))
-            for _ in range(10):
-                r, c_ = random.randint(0, h-20), random.randint(0, w-20)
-                noise[r:r+20, c_:c_+20, :] = random.randint(-150, 150)
+            for x in range(0, w, random.randint(3, 8)):
+                noise[:, x:x+2, :] = random.randint(-150, 150)
+        elif noise_type == "dots":
+            for _ in range(25): # Polka dots
+                r, c_ = random.randint(0, h-1), random.randint(0, w-1)
+                noise[r-5:r+5, c_-5:c_+5, :] = random.randint(-200, 200)
+        elif noise_type == "french":
+            # Simulate a French Tip or Gradient Tip
+            noise[int(h*0.6):, :, :] = random.randint(-200, 200)
+        elif noise_type == "gradient":
+            grid = np.linspace(0, random.randint(-150, 150), h)
+            for ch in range(c):
+                noise[:, :, ch] = grid[:, np.newaxis]
 
         # Apply noise ONLY inside the mask
         mask_3d = np.expand_dims(msk_np, axis=-1)
+        # Apply additive and subtractive changes to simulate 'colors' in grayscale
         img_np = img_np * (1 - mask_3d) + (img_np + noise) * mask_3d
         
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
