@@ -266,6 +266,9 @@ class NailDataset(Dataset):
     def _augment(self, image, masks):
         h_flipped = False
         v_flipped = False
+        S = self.image_size
+
+        # ── Spatial Flips ─────────────────────────────────────────────────────
         if random.random() > 0.5:
             image = TF.hflip(image)
             masks = [TF.hflip(m) for m in masks]
@@ -274,10 +277,28 @@ class NailDataset(Dataset):
             image = TF.vflip(image)
             masks = [TF.vflip(m) for m in masks]
             v_flipped = True
-        image = TF.adjust_brightness(image, 1 + random.uniform(-0.2,  0.2))
-        image = TF.adjust_contrast(image,   1 + random.uniform(-0.2,  0.2))
-        image = TF.adjust_saturation(image, 1 + random.uniform(-0.3,  0.3))
-        image = TF.adjust_hue(image,            random.uniform(-0.05, 0.05))
+
+        # ── Random Crop & Zoom (fixes single-finger failures) ─────────────────
+        # 50% chance: crop a random portion and resize back.
+        # This simulates close-up shots of 1-2 nails.
+        if random.random() > 0.5:
+            scale = random.uniform(0.6, 1.0)  # Zoom into 60%-100% of image
+            crop_size = int(S * scale)
+            top  = random.randint(0, S - crop_size)
+            left = random.randint(0, S - crop_size)
+            image = TF.resized_crop(image, top, left, crop_size, crop_size, (S, S), Image.BILINEAR)
+            masks = [TF.resized_crop(m, top, left, crop_size, crop_size, (S, S), Image.NEAREST) for m in masks]
+
+        # ── Aggressive Color Jitter (fixes colored nail failures) ─────────────
+        # Wide hue range: forces model to learn shape/edge NOT color.
+        image = TF.adjust_brightness(image, 1 + random.uniform(-0.35, 0.35))
+        image = TF.adjust_contrast(image,   1 + random.uniform(-0.35, 0.35))
+        image = TF.adjust_saturation(image, 1 + random.uniform(-0.5,  0.5))
+        image = TF.adjust_hue(image,            random.uniform(-0.5,  0.5))  # Full spectrum
+
+        # ── Grayscale (10% chance — forces edge/texture learning) ─────────────
+        if random.random() > 0.9:
+            image = TF.to_grayscale(image, num_output_channels=3)
         return image, masks, h_flipped, v_flipped
 
 

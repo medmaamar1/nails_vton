@@ -14,7 +14,7 @@ import torch.nn.functional as F
 # ── Loss Max-Pooling ───────────────────────────────────────────────────────────
 
 class LMPLoss(nn.Module):
-    def __init__(self, keep_ratio=0.1):
+    def __init__(self, keep_ratio=0.15):  # Increased 0.10 -> 0.15 for harder background
         super().__init__()
         self.keep_ratio = keep_ratio
 
@@ -24,7 +24,6 @@ class LMPLoss(nn.Module):
         targets : (B, 1, H, W) float mask (0 or 1)
         """
         # Equation 1: Multinomial NLL (Cross Entropy)
-        # Convert targets to long indices (B, H, W)
         targets_long = targets.squeeze(1).long()
         loss_map = F.cross_entropy(logits, targets_long, reduction="none")
         B         = loss_map.shape[0]
@@ -32,6 +31,25 @@ class LMPLoss(nn.Module):
         k         = max(1, int(loss_flat.size(1) * self.keep_ratio))
         top_k, _  = loss_flat.topk(k, dim=1)
         return top_k.mean()
+
+
+# ── Soft Dice Loss (fixes Patchiness & Ghost Nails) ───────────────────────────
+
+class SoftDiceLoss(nn.Module):
+    """
+    Treats the entire nail as ONE connected object.
+    Mathematically punishes 'holes' and 'patches' inside the predicted mask.
+    Complements NLL which works pixel-by-pixel.
+    """
+    def forward(self, logits, targets, eps=1e-6):
+        # Get the foreground probability (channel 1)
+        prob_fg = torch.softmax(logits, dim=1)[:, 1]   # (B, H, W)
+        target  = targets.squeeze(1).float()             # (B, H, W)
+        
+        intersection = (prob_fg * target).sum(dim=(-2, -1))
+        cardinality  = prob_fg.sum(dim=(-2, -1)) + target.sum(dim=(-2, -1))
+        dice         = (2. * intersection + eps) / (cardinality + eps)
+        return 1.0 - dice.mean()  # Loss = 1 - Dice Score
 
 
 # ── Direction Loss ────────────────────────────────────────────────────────────
@@ -61,12 +79,22 @@ class DirectionLoss(nn.Module):
 # ── Binary Segmentation Loss ──────────────────────────────────────────────────
 
 class BinarySegLoss(nn.Module):
-    def __init__(self, keep_ratio=0.1):
+    """
+    Combined NLL-LMP + Soft Dice Loss.
+    - NLL-LMP: Fixes hard pixels (knuckles, palm edges).
+    - Dice: Fixes patchiness and holes inside the nail region.
+    alpha=0.5 balances the two equally.
+    """
+    def __init__(self, keep_ratio=0.15, alpha=0.5):
         super().__init__()
-        self.lmp = LMPLoss(keep_ratio=keep_ratio)
+        self.lmp   = LMPLoss(keep_ratio=keep_ratio)
+        self.dice  = SoftDiceLoss()
+        self.alpha = alpha
 
     def forward(self, logits, targets):
-        return self.lmp(logits, targets)
+        l_nll  = self.lmp(logits, targets)
+        l_dice = self.dice(logits, targets)
+        return (1.0 - self.alpha) * l_nll + self.alpha * l_dice
 
 
 
@@ -76,9 +104,9 @@ class NailVTONLoss(nn.Module):
     Combined loss over the Laplacian pyramid.
     Sum of unweighted losses across all Levels returned by the model.
     """
-    def __init__(self, lmp_ratio=0.1):
+    def __init__(self, lmp_ratio=0.15, dice_alpha=0.5):
         super().__init__()
-        self.binary_loss    = BinarySegLoss(keep_ratio=lmp_ratio)
+        self.binary_loss    = BinarySegLoss(keep_ratio=lmp_ratio, alpha=dice_alpha)
         self.direction_loss = DirectionLoss()
 
     def _get_target_level(self, t_bin, t_dir, size):
