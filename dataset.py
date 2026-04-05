@@ -60,8 +60,14 @@ class NailDataset(Dataset):
             print(f"[Warning] No samples found for split '{split}'. Unique values in CSV: {list(pd.read_csv(csv_path)['split'].unique())}")
 
         # Store only strings — no PIL, no tensors in __init__
-        self.image_paths = [str(self.base_path / row["image_path"]) for _, row in df.iterrows()]
-        self.mask_paths  = [str(self.base_path / row["mask_path"])  for _, row in df.iterrows()]
+        def fix_path(p):
+            # The CSV uses 'valid/' but the folder is named 'val/'
+            if isinstance(p, str) and p.startswith("valid/"):
+                return p.replace("valid/", "val/", 1)
+            return p
+
+        self.image_paths = [str(self.base_path / fix_path(row["image_path"])) for _, row in df.iterrows()]
+        self.mask_paths  = [str(self.base_path / fix_path(row["mask_path"]))  for _, row in df.iterrows()]
 
         del df
         gc.collect()
