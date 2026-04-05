@@ -10,6 +10,7 @@ Dataset root should contain:
 """
 
 import sys
+import os
 import json
 import psutil
 import gc
