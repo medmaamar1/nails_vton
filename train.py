@@ -10,7 +10,6 @@ Dataset root should contain:
 """
 
 import sys
-import os
 import json
 import psutil
 import gc
@@ -32,7 +31,7 @@ from losses  import NailVTONLoss, compute_miou
 
 def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
-    p.add_argument("--data_root",   default="/kaggle/input/datasets/maamarmohamed/nail-segmentation/train")
+    p.add_argument("--data_root",   default="/kaggle/input/datasets/almohamed132/nails-vton/train")
     p.add_argument("--json_path",   default=None, help="Explicit path to annotations (optional)")
     p.add_argument("--epochs",      type=int,   default=100)
     p.add_argument("--batch_size",  type=int,   default=32)
@@ -45,7 +44,7 @@ def parse_args():
     p.add_argument("--warmup_epochs", type=int, default=5,
                    help="Linear LR warmup before cosine decay kicks in")
 
-    p.add_argument("--orientation_path", default="/kaggle/input/datasets/maamarmohamed/oriented-nails/mp_orientations_v1.json", 
+    p.add_argument("--orientation_path", default="/kaggle/input/datasets/almohamed132/nails-orientation/mp_orientations_v1.json", 
                    help="Path to mp_orientations_v1.json for strict orientation filtering")
     
     p.add_argument("--limit_train_batches", type=int, default=None,
@@ -70,88 +69,138 @@ def get_lr_scale(epoch, warmup_epochs, total_epochs):
 
 def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp, limit=None):
     model.train()
-    total_loss, total_miou, total_dir_loss = 0.0, 0.0, 0.0
-    n_batches = len(loader) if limit is None else min(len(loader), limit)
+    total_loss     = 0.0
+    total_miou     = 0.0
+    total_dir_loss = 0.0
+    n_batches      = len(loader) if limit is None else min(len(loader), limit)
+    loader_iter    = iter(loader)
+    for i in range(n_batches):
+        # Iterator Recycling: Force-purge zombie references
+        if i > 0 and i % 50 == 0:
+            del loader_iter
+            gc.collect(2)
+            torch.cuda.empty_cache()
+            loader_iter = iter(loader)
+            for _ in range(i): next(loader_iter)
 
-    for i, batch in enumerate(loader):
-        # 1. Forward/Backward
-        img = batch[0].to(device, non_blocking=True)
-        tgt = (None, batch[1].to(device, non_blocking=True), batch[2].to(device, non_blocking=True))
-        
+        try:
+            batch = next(loader_iter)
+        except StopIteration:
+            break
+
+        # Phase 6: targets is now a 3-tuple (img, bin, dir)
+        # BARE MINIMUM GPU TRANSFER
+        image   = batch[0].to("cuda:0", non_blocking=True)
+        targets = (
+            None, # placeholder for img
+            batch[1].to("cuda:0", non_blocking=True), # binary_mask
+            batch[2].to("cuda:0", non_blocking=True)  # direction_field
+        )
+        batch = None # Kill CPU batch immediately
+
         optimizer.zero_grad(set_to_none=True)
+
         with autocast("cuda", enabled=use_amp):
-            outputs = model(img) # FLAT TUPLE (bin0, dir0, bin1, dir1, bin2, dir2)
-            l_val, l_dict = criterion(outputs, tgt)
+            preds = model(image)
+            loss, loss_dict = criterion(preds, targets)
 
         if use_amp:
-            scaler.scale(l_val).backward()
+            scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            l_val.backward()
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-        # 2. Metrics (Strictly isolated)
-        with torch.no_grad():
-            # index 4 is final binary pred, tgt[1] is binary mask
-            m  = float(compute_miou(outputs[4].detach(), tgt[1]))
-            lv = float(l_dict["loss_total"])
-            dv = float(l_dict.get('l2_dir', 0.0))
-
-        total_loss += lv
-        total_miou += m
-        total_dir_loss += dv
-
-        # 3. ── NAPALM CLEANUP (EVERY STEP) ──
-        del outputs, img, l_val, l_dict
-        del tgt, batch
+        # Pull final level for metrics
+        final_preds = preds[-1]
+        # targets[1] is binary_mask
+        miou        = float(compute_miou(final_preds[0].detach(), targets[1]))
         
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        gc.collect(2) # Full collection every step
+        cur_loss_val = float(loss_dict["loss_total"])
+        cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
 
+        total_loss     += cur_loss_val
+        total_miou     += miou
+        total_dir_loss += cur_dir_val
+
+        # Step-by-step forensic logging
         if i < 40 or (i + 1) % 50 == 0:
             mem = psutil.virtual_memory().used / (1024**3)
-            print(f"  step {i+1}/{n_batches} | loss={lv:.4f} miou={m:.4f} | RAM={mem:.1f}GB")
+            print(f"  step {i+1}/{n_batches} | "
+                  f"loss={cur_loss_val:.4f}  "
+                  f"miou={miou:.4f}  "
+                  f"dir_loss={cur_dir_val:.4f} | "
+                  f"RAM={mem:.1f}GB")
+            
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            gc.collect(2)
 
-        if limit is not None and i + 1 >= limit: break
+        # Surgical Nullification
+        image       = None
+        targets     = None
+        preds       = None
+        loss        = None
+        loss_dict   = None
+        final_preds = None
+        if limit is not None and i + 1 >= limit:
+            break
 
-    return total_loss/n_batches, total_miou/n_batches, total_dir_loss/n_batches
+    return (total_loss     / n_batches,
+            total_miou     / n_batches,
+            total_dir_loss / n_batches)
 
 
 @torch.no_grad()
 def validate(model, loader, criterion, device, use_amp, limit=None):
     model.eval()
-    total_loss, total_miou, total_dir_loss = 0.0, 0.0, 0.0
-    n_batches = len(loader) if limit is None else min(len(loader), limit)
+    total_loss     = 0.0
+    total_miou     = 0.0
+    total_dir_loss = 0.0
+    n_batches      = len(loader) if limit is None else min(len(loader), limit)
 
-    for i, batch in enumerate(loader):
-        img = batch[0].to(device, non_blocking=True)
-        tgt = (None, batch[1].to(device, non_blocking=True), batch[2].to(device, non_blocking=True))
-        
+    loader_iter = iter(loader)
+    for i in range(n_batches):
+        try:
+            batch = next(loader_iter)
+        except StopIteration:
+            break
+
+        image   = batch[0].to("cuda:0", non_blocking=True)
+        targets = (
+            None,
+            batch[1].to("cuda:0", non_blocking=True),
+            batch[2].to("cuda:0", non_blocking=True)
+        )
+        batch = None
+
         with autocast("cuda", enabled=use_amp):
-            outputs = model(img)
-            _, l_dict = criterion(outputs, tgt)
+            preds = model(image)
+            _, loss_dict = criterion(preds, targets)
 
-        m  = float(compute_miou(outputs[4].detach(), tgt[1]))
-        lv = float(l_dict["loss_total"])
-        dv = float(l_dict.get('l2_dir', 0.0))
+        final_preds    = preds[-1]
+        v_loss_val     = float(loss_dict["loss_total"])
+        v_miou_val     = float(compute_miou(final_preds[0], targets[1]))
+        v_dir_val      = float(loss_dict.get('l2_dir', 0.0))
 
-        total_loss += lv
-        total_miou += m
-        total_dir_loss += dv
-        
-        del outputs, img, tgt, batch, l_dict
-        if (i+1) % 10 == 0:
-            torch.cuda.empty_cache()
-            gc.collect(2)
+        total_loss     += v_loss_val
+        total_miou     += v_miou_val
+        total_dir_loss += v_dir_val
 
-        if limit is not None and i + 1 >= limit: break
+        # Cleanup
+        image       = None
+        targets     = None
+        preds       = None
+        loss_dict   = None
+        final_preds = None
 
-    return total_loss/n_batches, total_miou/n_batches, total_dir_loss/n_batches
+    return (total_loss     / n_batches,
+            total_miou     / n_batches,
+            total_dir_loss / n_batches)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -162,33 +211,6 @@ def main():
                           "mps"  if torch.backends.mps.is_available() else "cpu")
     use_amp = not args.no_amp and device.type == "cuda"
     print(f"Device: {device}  |  AMP: {use_amp}")
-
-    # ── Path Verification & Auto-Discovery ──────────────────────────────────────
-    if not os.path.exists(args.data_root):
-        print(f"\n[ERROR] DATA ROOT NOT FOUND: {args.data_root}")
-        parent = os.path.dirname(args.data_root)
-        if os.path.exists(parent):
-            print(f"  But parent directory exists! Contents of {parent}:")
-            print(f"  {os.listdir(parent)}\n")
-        raise FileNotFoundError(f"Missing data_root: {args.data_root}")
-
-    if args.orientation_path and not os.path.exists(args.orientation_path):
-        print(f"\n[ERROR] ORIENTATION JSON NOT FOUND: {args.orientation_path}")
-        # The user's new dataset folder might have a different JSON filename.
-        parent = os.path.dirname(args.orientation_path)
-        if os.path.exists(parent):
-            jsons = [f for f in os.listdir(parent) if f.endswith('.json')]
-            print(f"  Parent directory '{parent}' exists!")
-            print(f"  Found these JSON files inside: {jsons}\n")
-            if len(jsons) == 1:
-                # Auto-correction
-                new_path = os.path.join(parent, jsons[0])
-                print(f"  -> AUTO-CORRECTING orientation_path to: {new_path}")
-                args.orientation_path = new_path
-            else:
-                raise FileNotFoundError(f"Missing orientation_path. Found JSONs: {jsons}")
-        else:
-            raise FileNotFoundError(f"Missing orientation_path AND parent directory: {parent}")
 
     # ── Data ───────────────────────────────────────────────────────────────────
     train_loader, val_loader = make_loaders(
@@ -203,16 +225,11 @@ def main():
     model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
     
     # Enable DataParallel for Kaggle 2x GPUs
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel!")
-        model = torch.nn.DataParallel(model)
-    else:
-        print(f"Using {device}")
-        
-    if hasattr(model, 'module'):
-        model.module.count_parameters()
-    else:
-        model.count_parameters()
+    # Force 1-GPU BASELINE to eliminate DataParallel leaks
+    device = torch.device("cuda:0")
+    model.to(device)
+    print(f"Using {device} (1-GPU Baseline)")
+    model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = NailVTONLoss()

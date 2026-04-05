@@ -122,21 +122,15 @@ class NailVTONLoss(nn.Module):
 
         return {"binary_mask": bin_t, "direction_field": dir_t}
 
-    def forward(self, flattened_preds, targets):
+    def forward(self, multi_predictions, targets):
         """
-        flattened_preds: tuple of 6 tensors (bin0, dir0, bin1, dir1, bin2, dir2)
+        multi_predictions: list of tuples (binary, direction)
         """
         total_loss = 0.0
         details = {}
 
-        # Unpack flat tuple into pairs
-        pairs = [
-            (flattened_preds[0], flattened_preds[1]),
-            (flattened_preds[2], flattened_preds[3]),
-            (flattened_preds[4], flattened_preds[5])
-        ]
-
-        for i, (p_bin, p_dir) in enumerate(pairs):
+        for i, preds in enumerate(multi_predictions):
+            p_bin, p_dir = preds
             h, w = p_bin.shape[-2:]
             
             # Phase 6: targets is a 3-tuple (img_t, bin_t, dir_t)
@@ -152,16 +146,13 @@ class NailVTONLoss(nn.Module):
             l_lvl = l_bin + l_dir
             total_loss += l_lvl
             
-            # Hard-detach to prevent memory leak
-            details[f"l{i}_total"] = float(l_lvl.detach().cpu())
-            details[f"l_bin_{i}"]   = float(l_bin.detach().cpu())
-            details[f"l_dir_{i}"]   = float(l_dir.detach().cpu())
-            
-            # Local unroll
-            del l_lvl, l_bin, l_dir, target_lvl, valid_mask
+            # Phase 4 Lockdown: Explicitly detach and copy to CPU item
+            details[f"l{i}_total"] = l_lvl.detach().cpu().item()
+            details[f"l_bin_{i}"]   = l_bin.detach().cpu().item()
+            details[f"l_dir_{i}"]   = l_dir.detach().cpu().item()
 
-        details["l2_dir"]     = float(sum(v for k,v in details.items() if "l_dir_" in k) / 3)
-        details["loss_total"] = float(total_loss.detach().cpu())
+        details["l2_dir"]     = float(sum(details[f"l_dir_{i}"] for i in range(len(multi_predictions))) / len(multi_predictions))
+        details["loss_total"] = total_loss.detach().cpu().item()
         return total_loss, details
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
