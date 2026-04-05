@@ -226,7 +226,10 @@ def main():
         model = torch.nn.DataParallel(model)
         
     model = model.to(device)
-    model.count_parameters()
+    if isinstance(model, torch.nn.DataParallel):
+        model.module.count_parameters()
+    else:
+        model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = NailVTONLoss()
