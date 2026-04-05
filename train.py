@@ -70,136 +70,103 @@ def get_lr_scale(epoch, warmup_epochs, total_epochs):
 
 def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp, limit=None):
     model.train()
-    total_loss     = 0.0
-    total_miou     = 0.0
-    total_dir_loss = 0.0
-    n_batches      = len(loader) if limit is None else min(len(loader), limit)
+    total_loss, total_miou, total_dir_loss = 0.0, 0.0, 0.0
+    n_batches = len(loader) if limit is None else min(len(loader), limit)
 
-    for i, batch in enumerate(loader):
-        # ── Data Transfer ──────────────────────────────────────────────────────
-        # Phase 6: targets is now a 3-tuple (img, bin, dir)
-        # BARE MINIMUM GPU TRANSFER
-        image   = batch[0].to(device, non_blocking=True)
-        targets = (
-            None, # placeholder for img
-            batch[1].to(device, non_blocking=True), # binary_mask
-            batch[2].to(device, non_blocking=True)  # direction_field
-        )
-        # Kill CPU batch immediately to free RAM
-        del batch
-
+    # ── Iron-Clad Step Function (Strict Scoping) ──
+    def _train_step(batch_data):
+        # image, bin, dir
+        img = batch_data[0].to(device, non_blocking=True)
+        tgt = (None, batch_data[1].to(device, non_blocking=True), batch_data[2].to(device, non_blocking=True))
+        
         optimizer.zero_grad(set_to_none=True)
-
         with autocast("cuda", enabled=use_amp):
-            preds = model(image)
-            loss, loss_dict = criterion(preds, targets)
+            outputs = model(img) # list of tuples
+            l_val, l_dict = criterion(outputs, tgt)
 
         if use_amp:
-            scaler.scale(loss).backward()
+            scaler.scale(l_val).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss.backward()
+            l_val.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-        # Compute metrics INLINE — no extra tensor reference stored
-        with torch.no_grad():
-            miou = float(compute_miou(preds[-1][0].detach(), targets[1]))
+        # Metrics
+        m = float(compute_miou(outputs[-1][0].detach(), tgt[1]))
+        lv = float(l_dict["loss_total"])
+        dv = float(l_dict.get('l2_dir', 0.0))
 
-        cur_loss_val = float(loss_dict["loss_total"])
-        cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
+        # ── NUCLEAR CLEANUP ──
+        # Breaking nested tuple references
+        for (b, d) in outputs:
+            del b, d
+        del outputs, img
+        # Breaking targets tuple
+        _, t1, t2 = tgt
+        del t1, t2, tgt
+        del l_val, l_dict
+        return lv, m, dv
 
-        total_loss     += cur_loss_val
-        total_miou     += miou
-        total_dir_loss += cur_dir_val
+    for i, batch in enumerate(loader):
+        cur_loss, cur_miou, cur_dir = _train_step(batch)
+        del batch # Kill CPU batch
 
-        # ── Surgical Nullification (BEFORE logging to ensure GC sees freed tensors) ──
-        # preds = [(bin0,dir0), (bin1,dir1), (bin2,dir2)]
-        # Must destroy each inner tuple explicitly — setting preds=None only kills the list
-        if preds is not None:
-            for (b, d) in preds:
-                del b, d
-            del preds
-            preds = None
-        
-        image       = None
-        targets     = None
-        loss        = None
-        loss_dict   = None
+        total_loss += cur_loss
+        total_miou += cur_miou
+        total_dir_loss += cur_dir
 
-        # Run GC every 10 steps to prevent fragmentation
-        if (i + 1) % 10 == 0:
-            gc.collect(1)
+        if (i + 1) % 10 == 0: gc.collect(1)
 
-        # ── Step logging ──────────────────────────────────────────────────────────
         if i < 40 or (i + 1) % 50 == 0:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
             gc.collect(2)
             mem = psutil.virtual_memory().used / (1024**3)
-            print(f"  step {i+1}/{n_batches} | "
-                  f"loss={cur_loss_val:.4f}  "
-                  f"miou={miou:.4f}  "
-                  f"dir_loss={cur_dir_val:.4f} | "
-                  f"RAM={mem:.1f}GB")
+            print(f"  step {i+1}/{n_batches} | loss={cur_loss:.4f} miou={cur_miou:.4f} | RAM={mem:.1f}GB")
 
-        if limit is not None and i + 1 >= limit:
-            break
+        if limit is not None and i + 1 >= limit: break
 
-    return (total_loss     / n_batches,
-            total_miou     / n_batches,
-            total_dir_loss / n_batches)
+    return total_loss/n_batches, total_miou/n_batches, total_dir_loss/n_batches
 
 
 @torch.no_grad()
 def validate(model, loader, criterion, device, use_amp, limit=None):
     model.eval()
-    total_loss     = 0.0
-    total_miou     = 0.0
-    total_dir_loss = 0.0
-    n_batches      = len(loader) if limit is None else min(len(loader), limit)
+    total_loss, total_miou, total_dir_loss = 0.0, 0.0, 0.0
+    n_batches = len(loader) if limit is None else min(len(loader), limit)
 
-    loader_iter = iter(loader)
-    for i in range(n_batches):
-        try:
-            batch = next(loader_iter)
-        except StopIteration:
-            break
-
-        image   = batch[0].to(device, non_blocking=True)
-        targets = (
-            None,
-            batch[1].to(device, non_blocking=True),
-            batch[2].to(device, non_blocking=True)
-        )
-        batch = None
-
+    def _val_step(batch_data):
+        img = batch_data[0].to(device, non_blocking=True)
+        tgt = (None, batch_data[1].to(device, non_blocking=True), batch_data[2].to(device, non_blocking=True))
+        
         with autocast("cuda", enabled=use_amp):
-            preds = model(image)
-            _, loss_dict = criterion(preds, targets)
+            outputs = model(img)
+            _, l_dict = criterion(outputs, tgt)
 
-        final_preds    = preds[-1]
-        v_loss_val     = float(loss_dict["loss_total"])
-        v_miou_val     = float(compute_miou(final_preds[0], targets[1]))
-        v_dir_val      = float(loss_dict.get('l2_dir', 0.0))
+        m = float(compute_miou(outputs[-1][0].detach(), tgt[1]))
+        lv = float(l_dict["loss_total"])
+        dv = float(l_dict.get('l2_dir', 0.0))
 
-        total_loss     += v_loss_val
-        total_miou     += v_miou_val
-        total_dir_loss += v_dir_val
+        for (b, d) in outputs: del b, d
+        del outputs, img
+        _, t1, t2 = tgt
+        del t1, t2, tgt
+        del l_dict
+        return lv, m, dv
 
-        # Cleanup
-        image       = None
-        targets     = None
-        preds       = None
-        loss_dict   = None
-        final_preds = None
+    for i, batch in enumerate(loader):
+        lv, m, dv = _val_step(batch)
+        del batch
+        total_loss += lv
+        total_miou += m
+        total_dir_loss += dv
+        if limit is not None and i + 1 >= limit: break
 
-    return (total_loss     / n_batches,
-            total_miou     / n_batches,
-            total_dir_loss / n_batches)
+    return total_loss/n_batches, total_miou/n_batches, total_dir_loss/n_batches
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────

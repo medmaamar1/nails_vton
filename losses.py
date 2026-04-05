@@ -146,13 +146,16 @@ class NailVTONLoss(nn.Module):
             l_lvl = l_bin + l_dir
             total_loss += l_lvl
             
-            # Phase 4 Lockdown: Explicitly detach and copy to CPU item
-            details[f"l{i}_total"] = l_lvl.detach().cpu().item()
-            details[f"l_bin_{i}"]   = l_bin.detach().cpu().item()
-            details[f"l_dir_{i}"]   = l_dir.detach().cpu().item()
+            # Hard-detach to prevent memory leak
+            details[f"l{i}_total"] = float(l_lvl.detach().cpu())
+            details[f"l_bin_{i}"]   = float(l_bin.detach().cpu())
+            details[f"l_dir_{i}"]   = float(l_dir.detach().cpu())
+            
+            # Local unroll
+            del l_lvl, l_bin, l_dir, target_lvl, valid_mask
 
-        details["l2_dir"]     = float(sum(details[f"l_dir_{i}"] for i in range(len(multi_predictions))) / len(multi_predictions))
-        details["loss_total"] = total_loss.detach().cpu().item()
+        details["l2_dir"]     = float(sum(v for k,v in details.items() if "l_dir_" in k) / len(multi_predictions))
+        details["loss_total"] = float(total_loss.detach().cpu())
         return total_loss, details
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
