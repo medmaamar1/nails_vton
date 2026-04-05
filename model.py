@@ -159,6 +159,11 @@ class NailVTONModel(nn.Module):
         def _norm_dir(d):
             return d / d.norm(dim=1, keepdim=True).clamp(min=1e-6)
 
+        final_bin = F.interpolate(out2_bin, size=(self.image_size, self.image_size),
+                                  mode="bilinear", align_corners=False)
+        final_dir = F.interpolate(out2_dir, size=(self.image_size, self.image_size),
+                                  mode="bilinear", align_corners=False)
+
         return (
             out0_bin, _norm_dir(out0_dir),
             out1_bin, _norm_dir(out1_dir),
