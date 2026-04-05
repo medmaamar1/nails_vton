@@ -33,14 +33,25 @@ DATA_ROOT     = "/kaggle/input/datasets/maamarmohamed/nail-segmentation/train"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def polygon_to_mask(polygon, height, width, offset_x=0, offset_y=0):
-    """Flat COCO polygon [x1,y1,x2,y2,...] → binary PIL mask with padding offset."""
-    mask = Image.new("L", (width, height), 0)
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def polygon_to_mask(polygon, max_dim, offset_x, offset_y, target_size=IMAGE_SIZE):
+    """
+    High-Precision Anti-Aliased Masking using 4x Super-Sampling.
+    Prevents 'pixellated' jagged edges by drawing at 1792px then downsampling.
+    """
+    # Supersampling factor 4
+    S = target_size * 4 
+    mask_large = Image.new("L", (S, S), 0)
+    
     if len(polygon) >= 6:
-        # Shift polygon by padding offsets
-        xy = [(x + offset_x, y + offset_y) for x, y in zip(polygon[::2], polygon[1::2])]
-        ImageDraw.Draw(mask).polygon(xy, fill=255)
-    return mask
+        # Scale factor from raw max_dim to 1792 target
+        scale = S / max_dim
+        xy = [((x + offset_x) * scale, (y + offset_y) * scale) for x, y in zip(polygon[::2], polygon[1::2])]
+        ImageDraw.Draw(mask_large).polygon(xy, fill=255)
+    
+    # Bilinear downsampling creates a smooth probability edge at 448x448
+    return mask_large.resize((target_size, target_size), Image.BILINEAR)
 
 
 
@@ -179,11 +190,9 @@ class NailDataset(Dataset):
         for ann in anns:
             seg = ann.get("segmentation", [])
             if not seg or len(seg[0]) < 6: continue
-            # Draw mask directly on a square canvas of max_dim x max_dim
-            m_sq = polygon_to_mask(seg[0], max_dim, max_dim, offset_x=pad_x, offset_y=pad_y)
-            # Resize square mask to 448x448
-            masks_resized.append(m_sq.resize((self.image_size, self.image_size), Image.NEAREST))
-            m_sq.close()
+            # Now uses 4x super-sampling for smooth edges
+            m_anti_aliased = polygon_to_mask(seg[0], max_dim, pad_x, pad_y, self.image_size)
+            masks_resized.append(m_anti_aliased)
 
         # Resize square canvas to 448x448
         image = canvas.resize((self.image_size, self.image_size), Image.BILINEAR)
