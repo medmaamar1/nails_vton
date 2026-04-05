@@ -152,44 +152,62 @@ class NailDataset(Dataset):
 
     def _vandalize_texture(self, img, msk):
         """
-        Injects random noise/patterns/solid colors strictly inside the nail mask.
-        Uses Alpha Blending to ensure colors feel like 'coatings' (non-opaque).
+        Anatomy-First chaos engine. Injects random, multi-directional, 
+        semi-transparent shapes to force the model to be 'Texture-Blind'.
         """
         img_np = np.array(img).astype(np.float32)
         msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
-        
-        # Create a noise pattern (Simulating real manicures)
         h, w, c = img_np.shape
-        noise_type = random.choice(["gauss", "stripes", "dots", "french", "gradient", "solid"])
-        noise = np.zeros((h, w, c))
-        alpha = random.uniform(0.4, 0.9) # Transparency level
         
-        if noise_type == "solid":
-            # Semi-transparent Solid Color
-            color = np.random.randint(0, 256, (3,))
-            mask_3d = np.expand_dims(msk_np, axis=-1)
-            img_np = img_np * (1 - mask_3d * alpha) + (color * mask_3d * alpha)
-            return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
-
-        if noise_type == "gauss":
-            noise = np.random.normal(0, 70, (h, w, c))
-        elif noise_type == "stripes":
-            for x in range(0, w, random.randint(3, 8)):
-                noise[:, x:x+2, :] = random.randint(-150, 150)
-        elif noise_type == "dots":
-            for _ in range(25): # Polka dots
-                r, c_ = random.randint(0, h-1), random.randint(0, w-1)
-                noise[r-5:r+5, c_-5:c_+5, :] = random.randint(-200, 200)
-        elif noise_type == "french":
-            noise[int(h*0.6):, :, :] = random.randint(-200, 200)
-        elif noise_type == "gradient":
-            grid = np.linspace(0, random.randint(-150, 150), h)
-            for ch in range(c):
-                noise[:, :, ch] = grid[:, np.newaxis]
-
-        # Apply noise ONLY inside the mask with Alpha Blending
+        # Create a blank noise buffer for this image
+        noise = np.zeros((h, w, c))
         mask_3d = np.expand_dims(msk_np, axis=-1)
-        img_np = img_np * (1 - mask_3d * alpha) + (img_np + noise) * (mask_3d * alpha)
+        alpha_base = random.uniform(0.4, 0.85)
+
+        # ── Chaos Logic ───────────────────────────────────────────────────────
+        mode = random.choice(["blobs", "chaos_lines", "french_gradient", "solid_tint"])
+        
+        if mode == "blobs":
+            # 3-6 Large Colorful Blobs
+            for _ in range(random.randint(3, 6)):
+                color = np.random.randint(0, 256, (3,))
+                radius = random.randint(15, 35)
+                ry, rx = random.randint(0, h), random.randint(0, w)
+                yy, xx = np.ogrid[:h, :w]
+                dist = (yy - ry)**2 + (xx - rx)**2
+                blob_mask = (dist <= radius**2).astype(float)
+                for ch in range(c):
+                    noise[:, :, ch] += blob_mask * (color[ch] - img_np[ry % h, rx % w, ch])
+
+        elif mode == "chaos_lines":
+            # Multi-directional random lines
+            for _ in range(random.randint(5, 10)):
+                color = np.random.randint(0, 256, (3,))
+                thickness = random.randint(2, 6)
+                angle = random.uniform(0, np.pi)
+                # Simple line simulation by projection
+                cos_a, sin_a = np.cos(angle), np.sin(angle)
+                yy, xx = np.ogrid[:h, :w]
+                proj = xx * cos_a + yy * sin_a
+                line_mask = (np.abs(proj - random.randint(0, h+w)) < thickness).astype(float)
+                for ch in range(c):
+                    noise[:, :, ch] += line_mask * (color[ch] - 128)
+
+        elif mode == "french_gradient":
+            # Gradient Tip (random color)
+            color = np.random.randint(0, 256, (3,))
+            grad = np.linspace(0, 1, h).reshape(h, 1)
+            for ch in range(c):
+                noise[:, :, ch] = (grad ** 2) * (color[ch] - 128)
+
+        else: # solid_tint
+            color = np.random.randint(0, 256, (3,))
+            for ch in range(c):
+                noise[:, :, ch] = (color[ch] - 128)
+
+        # ── Final Alpha Blending ─────────────────────────────────────────────
+        # All noise is applied strictly inside the nail mask with semi-transparency
+        img_np = img_np * (1 - mask_3d * alpha_base) + (img_np + noise) * (mask_3d * alpha_base)
         
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
