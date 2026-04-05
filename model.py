@@ -1,17 +1,15 @@
 """
 Nail VTON Model
 ---------------
-Backbone: TWO independent MobileNetV3-Large prefixes (no shared weights).
+Backbone : MobileNetV3-Large (two independent prefix encoders).
+Task     : Binary segmentation ONLY. Direction head removed.
 
-Verified channel map (probed on H/2=224x224 input):
-  encoder_high : features[0:4]  -> 24ch  @ H/8  of original (full-res input)
-  encoder_low  : features[0:7]  -> 40ch  @ H/16 of original (H/2 input, feat_s4)
-                 features[7:13] -> 112ch @ H/16 of original (feat_s8, surgery applied)
+Output shape: (B, 2, H, W) — logits for [background, nail].
 
-CFF fusion width and PyramidHeads are unchanged from paper.
-All module names (encoder_low, encoder_high, fusion_low, fusion_high,
-head_l0, head_l1, head_final) are identical to the V2 model to keep
-state_dict keys compatible within the same training run.
+Channel map (verified on (1,3,224,224) input):
+  encoder_high : features[0:4]  -> 24ch  @ H/8  of original input
+  encoder_low  : features[0:7]  -> 40ch  @ H/16 of half-res input (feat_s4)
+                 features[7:13] -> 112ch @ H/16 of half-res (feat_s8, surgery)
 """
 import torch
 import torch.nn as nn
@@ -19,7 +17,7 @@ import torch.nn.functional as F
 import torchvision.models as models
 
 
-# ── Shared building blocks (unchanged from paper) ──────────────────────────────
+# ── Building blocks ────────────────────────────────────────────────────────────
 
 class DepthwiseSeparable(nn.Module):
     def __init__(self, in_ch, out_ch):
@@ -34,71 +32,47 @@ class DepthwiseSeparable(nn.Module):
 
 
 class CFF(nn.Module):
+    """Cross-scale Feature Fusion."""
     def __init__(self, low_ch, high_ch, out_ch=320):
         super().__init__()
-        self.low_conv = nn.Sequential(
-            nn.Conv2d(low_ch,  out_ch, 3, padding=2, dilation=2, bias=False),
-            nn.BatchNorm2d(out_ch),
-        )
-        self.high_conv = nn.Sequential(
-            nn.Conv2d(high_ch, out_ch, 1, bias=False),
-            nn.BatchNorm2d(out_ch),
-        )
-        self.act = nn.ReLU6(inplace=True)
+        self.low_conv  = nn.Sequential(nn.Conv2d(low_ch,  out_ch, 3, padding=2, dilation=2, bias=False), nn.BatchNorm2d(out_ch))
+        self.high_conv = nn.Sequential(nn.Conv2d(high_ch, out_ch, 1, bias=False), nn.BatchNorm2d(out_ch))
+        self.act       = nn.ReLU6(inplace=True)
 
     def forward(self, low_feat, high_feat):
-        low_up = F.interpolate(low_feat, size=high_feat.shape[2:],
-                               mode="bilinear", align_corners=False)
+        low_up = F.interpolate(low_feat, size=high_feat.shape[2:], mode="bilinear", align_corners=False)
         return self.act(self.low_conv(low_up) + self.high_conv(high_feat))
 
 
-class PyramidHeads(nn.Module):
+class SegHead(nn.Module):
+    """Single-task binary segmentation head. Direction head removed."""
     def __init__(self, in_ch):
         super().__init__()
         self.shared = DepthwiseSeparable(in_ch, 10)
-        self.binary = nn.Conv2d(10, 2, 1)
+        self.binary = nn.Conv2d(10, 2, 1)  # 2 classes: background, nail
 
     def forward(self, x):
-        shared_feat = self.shared(x)
-        return self.binary(shared_feat)
+        return self.binary(self.shared(x))  # (B, 2, H, W)
 
 
 # ── MobileNetV3-Large prefix encoder ──────────────────────────────────────────
 
 class MobileNetV3LargePrefix(nn.Module):
-    """
-    Wraps a prefix of MobileNetV3-Large.
-
-    Parameters
-    ----------
-    end_idx    : int   – slice backbone.features[:end_idx]
-    split_idx  : int | None – if set, forward() returns (feat[:split], feat[split:])
-    pretrained : bool
-    surgery    : bool – if True, modify the first strided depthwise conv in the
-                        sub-sequence to stride=1 + dilation=2, keeping the same
-                        receptive field but halving the actual spatial stride.
-                        This converts H/32 -> H/16 (matching paper's low-res path).
-    """
     def __init__(self, end_idx, split_idx=None, pretrained=True, surgery=False):
         super().__init__()
         self.split_idx = split_idx
-
-        weights = models.MobileNet_V3_Large_Weights.IMAGENET1K_V1 if pretrained else None
-        backbone = models.mobilenet_v3_large(weights=weights)
-        self.features = nn.Sequential(*backbone.features[:end_idx])
+        weights        = models.MobileNet_V3_Large_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone       = models.mobilenet_v3_large(weights=weights)
+        self.features  = nn.Sequential(*backbone.features[:end_idx])
 
         if surgery:
-            # Walk all conv layers in the features sub-sequence and patch the
-            # FIRST depthwise conv that still has stride=2.
             patched = False
             for m in self.features.modules():
                 if (isinstance(m, nn.Conv2d)
                         and m.groups == m.in_channels
                         and m.stride == (2, 2)
                         and not patched):
-                    m.stride   = (1, 1)
-                    m.dilation = (2, 2)
-                    m.padding  = (2, 2)
+                    m.stride = (1, 1); m.dilation = (2, 2); m.padding = (2, 2)
                     patched = True
 
     def forward(self, x):
@@ -116,69 +90,46 @@ class NailVTONModel(nn.Module):
         super().__init__()
         self.image_size = image_size
 
-        # ── Verified channel constants (MobileNetV3-Large) ─────────────────────
-        # All numbers confirmed by running a probe script on (1,3,224,224) input:
-        HIGH_CH   = 24    # encoder_high  : features[0:4]  -> 24ch @ H/8 of full input
-        LOW_S4_CH = 40    # encoder_low s4: features[0:7]  -> 40ch @ H/16 of full input
-        LOW_S8_CH = 112   # encoder_low s8: features[7:13] -> 112ch (surgery: H/16)
-        FUSE      = 320   # CFF output width (paper default, kept identical)
+        HIGH_CH   = 24
+        LOW_S4_CH = 40
+        LOW_S8_CH = 112
+        FUSE      = 320
 
-        # High-res encoder: full-resolution input -> 24ch @ H/8
-        self.encoder_high = MobileNetV3LargePrefix(
-            end_idx=4, split_idx=None, pretrained=pretrained, surgery=False
-        )
+        self.encoder_high = MobileNetV3LargePrefix(end_idx=4,  split_idx=None, pretrained=pretrained, surgery=False)
+        self.encoder_low  = MobileNetV3LargePrefix(end_idx=13, split_idx=7,    pretrained=pretrained, surgery=True)
 
-        # Low-res encoder: H/2 input, split at local offset 7
-        #   forward() returns (feat_s4: 40ch, feat_s8: 112ch)
-        self.encoder_low = MobileNetV3LargePrefix(
-            end_idx=13, split_idx=7, pretrained=pretrained, surgery=True
-        )
+        self.fusion_low   = CFF(LOW_S8_CH, LOW_S4_CH, FUSE)
+        self.fusion_high  = CFF(FUSE,      HIGH_CH,   FUSE)
 
-        # CFF blocks (architecture identical to paper)
-        self.fusion_low  = CFF(LOW_S8_CH, LOW_S4_CH, FUSE)  # 112ch + 40ch  -> 320ch
-        self.fusion_high = CFF(FUSE,      HIGH_CH,   FUSE)  # 320ch + 24ch  -> 320ch
-
-        # Laplacian pyramid heads (architecture identical to paper)
-        self.head_l0    = PyramidHeads(FUSE)
-        self.head_l1    = PyramidHeads(FUSE)
-        self.head_final = PyramidHeads(FUSE)
+        # Single segmentation head — no direction head
+        self.head = SegHead(FUSE)
 
     def forward(self, x):
         with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled()):
-            x_half            = F.interpolate(x, scale_factor=0.5,
-                                              mode="bilinear", align_corners=False)
-            feat_high         = self.encoder_high(x)
+            x_half               = F.interpolate(x, scale_factor=0.5, mode="bilinear", align_corners=False)
+            feat_high            = self.encoder_high(x)
             feat_low_s4, feat_low_s8 = self.encoder_low(x_half)
 
-        # Level 0 – low-resolution side-output
-        f0       = self.fusion_low(feat_low_s8, feat_low_s4)
-        out0_bin = self.head_l0(f0)
+        f0      = self.fusion_low(feat_low_s8, feat_low_s4)
+        f1      = self.fusion_high(f0, feat_high)
+        logits  = self.head(f1)  # (B, 2, H', W')
 
-        # Level 1 – high-resolution side-output
-        f1       = self.fusion_high(f0, feat_high)
-        out1_bin = self.head_l1(f1)
-
-        # Final – upsampled to full resolution
-        out2_bin = self.head_final(f1)
-
-        final_bin = F.interpolate(out2_bin, size=(self.image_size, self.image_size),
-                                  mode="bilinear", align_corners=False)
-
-        # Phase 4 Simplification: Return ONLY Binary Masks
-        return [out0_bin, out1_bin, final_bin]
+        # Upsample to full image resolution
+        out = F.interpolate(logits, size=(self.image_size, self.image_size),
+                            mode="bilinear", align_corners=False)
+        return out  # (B, 2, H, W)
 
     @torch.no_grad()
-    def predict(self, x, binary_thresh=0.5):
+    def predict(self, x, threshold=0.5):
+        """Returns binary mask (B, 1, H, W)."""
         self.eval()
-        multi_preds = self(x)
-        final_bin = multi_preds[-1]
-        prob_fg = torch.softmax(final_bin, dim=1)[:, 1:2]
-        return prob_fg > binary_thresh
+        prob_nail = torch.softmax(self(x), dim=1)[:, 1:2]
+        return (prob_nail > threshold).float()
 
     def count_parameters(self):
         total     = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"Parameters -- total: {total:,}  trainable: {trainable:,}")
+        print(f"Parameters — total: {total:,}  trainable: {trainable:,}")
         return total, trainable
 
 
@@ -187,12 +138,7 @@ class NailVTONModel(nn.Module):
 if __name__ == "__main__":
     model = NailVTONModel(image_size=448, pretrained=False)
     model.count_parameters()
-
-    dummy = torch.randn(1, 3, 448, 448)
-    outs  = model(dummy)
-
-    print(f"Laplacian levels: {len(outs)}")
-    for i, b in enumerate(outs):
-        print(f"  Level {i}: bin={b.shape}")
-
-    print("\nModel Architecture Check PASSED ✓")
+    out = model(torch.randn(1, 3, 448, 448))
+    print(f"Output shape : {out.shape}")   # Expected: (1, 2, 448, 448)
+    assert out.shape == (1, 2, 448, 448), "Shape mismatch!"
+    print("Model Architecture Check PASSED ✓")
