@@ -81,7 +81,7 @@ class NailDataset(Dataset):
         # ── Load image (grayscale agnostic) ───────────────────────────────────
         img = Image.open(self.image_paths[idx]).convert("RGB")
         img = ImageOps.exif_transpose(img)          # Fix phone rotation
-        img = TF.to_grayscale(img, num_output_channels=3)  # R=G=B agnostic
+        # img = TF.to_grayscale(img, num_output_channels=3)  # Removed for Full RGB Training
 
         # ── Load mask ─────────────────────────────────────────────────────────
         msk = Image.open(self.mask_paths[idx]).convert("L")  # 1-channel
