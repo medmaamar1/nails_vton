@@ -44,7 +44,7 @@ def parse_args():
     p.add_argument("--warmup_epochs", type=int, default=5,
                    help="Linear LR warmup before cosine decay kicks in")
 
-    p.add_argument("--orientation_path", default="/kaggle/input/datasets/maamarmohamed/mapped-nails/mp_orientations_v1.json", 
+    p.add_argument("--orientation_path", default="/kaggle/input/datasets/maamarmohamed/oriented-nails/mp_orientations_v1.json", 
                    help="Path to mp_orientations_v1.json for strict orientation filtering")
     
     p.add_argument("--limit_train_batches", type=int, default=None,
