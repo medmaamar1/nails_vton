@@ -152,69 +152,61 @@ class NailDataset(Dataset):
 
     def _vandalize_texture(self, img, msk):
         """
-        Layered Manicure Engine. 
-        Paints a Base Coat (Step 1) + Art Overlays (Step 2: Stars, Rects, Stripes).
+        Sequential Layered Manicure Engine.
+        Step 1: Paint Base Coat. 
+        Step 2: Paint Art (on top of Base Coat).
         """
         img_np = np.array(img).astype(np.float32)
         msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
         h, w, c = img_np.shape
         mask_3d = np.expand_dims(msk_np, axis=-1)
         
-        # Buffer for our synthetic art
-        art_layer = np.zeros((h, w, c))
-        art_mask  = np.zeros((h, w, 1))
-
         # ── Step 1: Base Coat (80% chance) ───────────────────────────────────
         if random.random() > 0.2:
             color = np.random.randint(0, 256, (3,))
-            if random.random() > 0.5: # Solid
-                art_layer += color
+            a = random.uniform(0.4, 0.9)
+            if random.random() > 0.4: # Solid
+                img_np = img_np * (1 - mask_3d * a) + (color * mask_3d * a)
             else: # Gradient
                 grad = np.linspace(0, 1, h).reshape(h, 1, 1)
-                art_layer += grad * color
-            art_mask += 1.0
+                img_np = img_np * (1 - mask_3d * a * grad) + (color * mask_3d * a * grad)
 
-        # ── Step 2: Art Overlay (Star, Rect, Stripes) ────────────────────────
+        # ── Step 2: Sequential Art Overlays (Stars, Rects, Stripes) ──────────
         if random.random() > 0.2:
-            num_shapes = random.randint(2, 5)
-            for _ in range(num_shapes):
-                shape_type = random.choice(["rect", "star", "stripe"])
+            num_designs = random.randint(2, 6)
+            for _ in range(num_designs):
+                dtype = random.choice(["rect", "star", "stripe"])
                 color = np.random.randint(0, 256, (3,))
+                a     = random.uniform(0.6, 0.95) # Stickers are usually fairly opaque
                 
-                if shape_type == "rect":
-                    rW, rH = random.randint(10, 30), random.randint(10, 30)
-                    ry, rx = random.randint(0, h-rH), random.randint(0, w-rW)
-                    art_layer[ry:ry+rH, rx:rx+rW, :] = color
-                    art_mask[ry:ry+rH, rx:rx+rW, :] = 1.0
+                # Create a specific mask for this one design piece
+                s_mask = np.zeros((h, w, 1))
                 
-                elif shape_type == "stripe":
+                if dtype == "rect":
+                    rw, rh = random.randint(15, 45), random.randint(15, 45)
+                    ry, rx = random.randint(0, h-rh), random.randint(0, w-rw)
+                    s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
+                
+                elif dtype == "stripe":
                     angle = random.uniform(0, np.pi)
                     cos_a, sin_a = np.cos(angle), np.sin(angle)
-                    thickness = random.randint(2, 5)
+                    thick = random.randint(3, 8)
                     yy, xx = np.ogrid[:h, :w]
                     proj = xx * cos_a + yy * sin_a
-                    line_m = (np.abs(proj - random.randint(0, h+w)) < thickness).astype(float)
-                    art_layer += np.expand_dims(line_m, -1) * color
-                    art_mask += np.expand_dims(line_m, -1)
+                    s_mask = (np.abs(proj - random.randint(0, h+w)) < thick).astype(float)
+                    s_mask = np.expand_dims(s_mask, -1)
 
-                elif shape_type == "star":
-                    # Simple 5-point star simulation using small blobs
-                    ry, rx = random.randint(0, h), random.randint(0, w)
-                    radius = random.randint(8, 15)
-                    yy, xx = np.ogrid[:h, :w]
-                    dist = (yy - ry)**2 + (xx - rx)**2
-                    star_m = (dist <= radius**2).astype(float)
-                    art_layer += np.expand_dims(star_m, -1) * color
-                    art_mask += np.expand_dims(star_m, -1)
+                elif dtype == "star":
+                    # Simulated star using 3 overlapping thin rects at different angles
+                    ry, rx = random.randint(10, h-10), random.randint(10, w-10)
+                    size = random.randint(8, 16)
+                    s_mask[ry-size:ry+size, rx-2:rx+2, :] = 1.0
+                    s_mask[ry-2:ry+2, rx-size:rx+size, :] = 1.0
 
-        # ── Step 3: Alpha Blend & Apply ──────────────────────────────────────
-        alpha = random.uniform(0.5, 0.9)
-        art_mask = np.clip(art_mask, 0, 1)
-        
-        # Combine: Original * (1 - Art) + Art
-        # Only apply where the Nail Mask exists
-        final_mask = art_mask * mask_3d * alpha
-        img_np = img_np * (1 - final_mask) + (art_layer * final_mask)
+                # Bake this design piece ON TOP of the current img_np
+                # But only where the actual nail exists
+                final_piece_mask = s_mask * mask_3d * a
+                img_np = img_np * (1 - final_piece_mask) + (color * final_piece_mask)
         
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
