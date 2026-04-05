@@ -35,8 +35,13 @@ class NailDataset(Dataset):
         csv_path = self.root / "NailSegmentationV1.csv"
         df = pd.read_csv(csv_path)
         
-        # Filter by split (train, val, test)
-        df = df[df['split'] == split].reset_index(drop=True)
+        # Standardize split names (handle 'val' vs 'valid')
+        if split == "val":
+            mask = (df['split'] == "val") | (df['split'] == "valid")
+        else:
+            mask = df['split'] == split
+            
+        df = df[mask].reset_index(drop=True)
         
         self.image_paths = df['image_path'].tolist()
         self.mask_paths  = df['mask_path'].tolist()
