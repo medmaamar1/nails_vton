@@ -46,6 +46,11 @@ def parse_args():
 
     p.add_argument("--orientation_path", default="/kaggle/input/datasets/almohamed132/nails-orientation/mp_orientations_v1.json", 
                    help="Path to mp_orientations_v1.json for strict orientation filtering")
+    
+    p.add_argument("--limit_train_batches", type=int, default=None,
+                   help="Limit number of training batches per epoch (for smoke testing)")
+    p.add_argument("--limit_val_batches", type=int, default=None,
+                   help="Limit number of validation batches per epoch (for smoke testing)")
     return p.parse_args()
 
 
@@ -62,12 +67,12 @@ def get_lr_scale(epoch, warmup_epochs, total_epochs):
 
 # ── One epoch ──────────────────────────────────────────────────────────────────
 
-def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp):
+def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp, limit=None):
     model.train()
     total_loss     = 0.0
     total_miou     = 0.0
     total_dir_loss = 0.0
-    n_batches      = len(loader)
+    n_batches      = len(loader) if limit is None else min(len(loader), limit)
     loader_iter    = iter(loader)
     for i in range(n_batches):
         # Iterator Recycling: Force-purge zombie references
@@ -142,6 +147,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         loss        = None
         loss_dict   = None
         final_preds = None
+        if limit is not None and i + 1 >= limit:
+            break
 
     return (total_loss     / n_batches,
             total_miou     / n_batches,
@@ -149,15 +156,15 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
 
 @torch.no_grad()
-def validate(model, loader, criterion, device, use_amp):
+def validate(model, loader, criterion, device, use_amp, limit=None):
     model.eval()
     total_loss     = 0.0
     total_miou     = 0.0
     total_dir_loss = 0.0
-    n_batches      = len(loader)
+    n_batches      = len(loader) if limit is None else min(len(loader), limit)
 
     loader_iter = iter(loader)
-    for _ in range(n_batches):
+    for i in range(n_batches):
         try:
             batch = next(loader_iter)
         except StopIteration:
@@ -295,10 +302,10 @@ def main():
               f"LR=[enc={current_lrs[0]}, dec={current_lrs[1]}]")
 
         train_loss, train_miou, train_dir_loss = train_one_epoch(
-            model, train_loader, optimizer, criterion, scaler, device, use_amp
+            model, train_loader, optimizer, criterion, scaler, device, use_amp, limit=args.limit_train_batches
         )
         val_loss, val_miou, val_dir_loss = validate(
-            model, val_loader, criterion, device, use_amp
+            model, val_loader, criterion, device, use_amp, limit=args.limit_val_batches
         )
 
         elapsed = time.time() - t0
