@@ -126,7 +126,7 @@ class NailDataset(Dataset):
         for img in coco["images"]:
             iid   = img["id"]
             fname = img["file_name"]
-            
+
             # STRICT FILTER: Skip if this image wasn't found in mp_orientations
             if str(iid) not in self.orientations:
                 continue
@@ -195,8 +195,9 @@ class NailDataset(Dataset):
         del masks_pil
 
         # ── Augmentation ──────────────────────────────────────────────────────
+        flip_h, flip_v = False, False
         if self.augment:
-            image, masks_resized = self._augment(image, masks_resized)
+            image, masks_resized, flip_h, flip_v = self._augment(image, masks_resized)
 
         # ── Image tensor ──────────────────────────────────────────────────────
         img_t = TF.normalize(TF.to_tensor(image), MEAN, STD)  # (3, H, W)
@@ -230,13 +231,17 @@ class NailDataset(Dataset):
                 # Use ground-truth orientation [dx, dy]
                 dx, dy = img_orientations[ann_id_str]
                 
+                # Invert vector direction if image was flipped!
+                if flip_h:
+                    dx = -dx
+                if flip_v:
+                    dy = -dy
+                
                 # Create a uniform directional vector for the foreground area
                 vector_field = np.zeros((2, S, S), dtype=np.float32)
                 vector_field[0, mask_np > 0] = dx
                 vector_field[1, mask_np > 0] = dy
                 dir_np += vector_field
-            else:
-                pass # Strict compliance: do not default to geometry
 
         finger_t = torch.from_numpy(finger_np).clone()
 
@@ -264,17 +269,21 @@ class NailDataset(Dataset):
     # ── Augmentation ──────────────────────────────────────────────────────────
 
     def _augment(self, image, masks):
-        if random.random() > 0.5:
+        flip_h = random.random() > 0.5
+        flip_v = random.random() > 0.5
+        
+        if flip_h:
             image = TF.hflip(image)
             masks = [TF.hflip(m) for m in masks]
-        if random.random() > 0.5:
+        if flip_v:
             image = TF.vflip(image)
             masks = [TF.vflip(m) for m in masks]
+            
         image = TF.adjust_brightness(image, 1 + random.uniform(-0.2,  0.2))
         image = TF.adjust_contrast(image,   1 + random.uniform(-0.2,  0.2))
         image = TF.adjust_saturation(image, 1 + random.uniform(-0.3,  0.3))
         image = TF.adjust_hue(image,            random.uniform(-0.05, 0.05))
-        return image, masks
+        return image, masks, flip_h, flip_v
 
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────

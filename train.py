@@ -218,14 +218,14 @@ def main():
         orientation_path = args.orientation_path
     )
 
-    # ── Model ──────────────────────────────────────────────────────────────────
-    model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
+    model = NailVTONModel(image_size=args.image_size, pretrained=True)
     
     # Enable DataParallel for Kaggle 2x GPUs
-    # Force 1-GPU BASELINE to eliminate DataParallel leaks
-    device = torch.device("cuda:0")
-    model.to(device)
-    print(f"Using {device} (1-GPU Baseline)")
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel!")
+        model = torch.nn.DataParallel(model)
+        
+    model = model.to(device)
     model.count_parameters()
 
     # ── Loss ───────────────────────────────────────────────────────────────────
