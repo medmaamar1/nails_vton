@@ -72,9 +72,11 @@ class SobelEdgeLoss(nn.Module):
 
     def _get_edges(self, x):
         # x is (B, 1, H, W)
-        # Fix: Sync dtype of kernels with input (required for AMP/autocast)
-        gx = F.conv2d(x, self.kx.to(x.dtype), padding=1)
-        gy = F.conv2d(x, self.ky.to(x.dtype), padding=1)
+        # Bulletproof Fix: Force kernels to exactly match the input's device AND precision
+        weight_x = self.kx.to(device=x.device, dtype=x.dtype)
+        weight_y = self.ky.to(device=x.device, dtype=x.dtype)
+        gx = F.conv2d(x, weight_x, padding=1)
+        gy = F.conv2d(x, weight_y, padding=1)
         return torch.sqrt(gx**2 + gy**2 + 1e-6)
 
     def forward(self, logits, targets):
