@@ -31,8 +31,7 @@ from losses  import NailVTONLoss, compute_miou
 
 def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
-    p.add_argument("--data_root",   default="/kaggle/input/datasets/maamarmohamed/nail-segmentation/train")
-    p.add_argument("--json_path",   default=None, help="Explicit path to annotations (optional)")
+    p.add_argument("--data_root",   default="/kaggle/input/datasets/muhammadhammad261/nail-segmentation-dataset/NailSegmentationDatasetV2")
     p.add_argument("--epochs",      type=int,   default=100)
     p.add_argument("--batch_size",  type=int,   default=32)
     p.add_argument("--lr",          type=float, default=1e-3)
@@ -43,9 +42,6 @@ def parse_args():
     p.add_argument("--no_amp",      action="store_true")
     p.add_argument("--warmup_epochs", type=int, default=5,
                    help="Linear LR warmup before cosine decay kicks in")
-
-    p.add_argument("--orientation_path", default="/kaggle/input/datasets/maamarmohamed/oriented-nails/mp_orientations_v1.json", 
-                   help="Path to mp_orientations_v1.json for strict orientation filtering")
     
     p.add_argument("--limit_train_batches", type=int, default=None,
                    help="Limit number of training batches per epoch (for smoke testing)")
@@ -71,11 +67,9 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
     model.train()
     total_loss     = 0.0
     total_miou     = 0.0
-    total_dir_loss = 0.0
     n_batches      = len(loader) if limit is None else min(len(loader), limit)
     loader_iter    = iter(loader)
     for i in range(n_batches):
-        # Iterator Recycling: Force-purge zombie references
         if i > 0 and i % 50 == 0:
             del loader_iter
             gc.collect(2)
@@ -88,15 +82,9 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         except StopIteration:
             break
 
-        # Phase 6: targets is now a 3-tuple (img, bin, dir)
-        # BARE MINIMUM GPU TRANSFER
         image   = batch[0].to("cuda:0", non_blocking=True)
-        targets = (
-            None, # placeholder for img
-            batch[1].to("cuda:0", non_blocking=True), # binary_mask
-            batch[2].to("cuda:0", non_blocking=True)  # direction_field
-        )
-        batch = None # Kill CPU batch immediately
+        targets = batch[1].to("cuda:0", non_blocking=True)
+        batch = None
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -115,32 +103,25 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-        # Pull final level for metrics
         final_preds = preds[-1]
-        # targets[1] is binary_mask
-        miou        = float(compute_miou(final_preds[0].detach(), targets[1]))
+        miou        = float(compute_miou(final_preds.detach(), targets))
         
         cur_loss_val = float(loss_dict["loss_total"])
-        cur_dir_val  = float(loss_dict.get('l2_dir', 1.0))
 
         total_loss     += cur_loss_val
         total_miou     += miou
-        total_dir_loss += cur_dir_val
 
-        # Step-by-step forensic logging
         if i < 40 or (i + 1) % 50 == 0:
             mem = psutil.virtual_memory().used / (1024**3)
             print(f"  step {i+1}/{n_batches} | "
                   f"loss={cur_loss_val:.4f}  "
-                  f"miou={miou:.4f}  "
-                  f"dir_loss={cur_dir_val:.4f} | "
+                  f"miou={miou:.4f} | "
                   f"RAM={mem:.1f}GB")
             
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
             gc.collect(2)
 
-        # Surgical Nullification
         image       = None
         targets     = None
         preds       = None
@@ -150,9 +131,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         if limit is not None and i + 1 >= limit:
             break
 
-    return (total_loss     / n_batches,
-            total_miou     / n_batches,
-            total_dir_loss / n_batches)
+    return (total_loss / n_batches, total_miou / n_batches)
 
 
 @torch.no_grad()
@@ -160,7 +139,6 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
     model.eval()
     total_loss     = 0.0
     total_miou     = 0.0
-    total_dir_loss = 0.0
     n_batches      = len(loader) if limit is None else min(len(loader), limit)
 
     loader_iter = iter(loader)
@@ -171,11 +149,7 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
             break
 
         image   = batch[0].to("cuda:0", non_blocking=True)
-        targets = (
-            None,
-            batch[1].to("cuda:0", non_blocking=True),
-            batch[2].to("cuda:0", non_blocking=True)
-        )
+        targets = batch[1].to("cuda:0", non_blocking=True)
         batch = None
 
         with autocast("cuda", enabled=use_amp):
@@ -184,23 +158,18 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
 
         final_preds    = preds[-1]
         v_loss_val     = float(loss_dict["loss_total"])
-        v_miou_val     = float(compute_miou(final_preds[0], targets[1]))
-        v_dir_val      = float(loss_dict.get('l2_dir', 0.0))
+        v_miou_val     = float(compute_miou(final_preds, targets))
 
         total_loss     += v_loss_val
         total_miou     += v_miou_val
-        total_dir_loss += v_dir_val
 
-        # Cleanup
         image       = None
         targets     = None
         preds       = None
         loss_dict   = None
         final_preds = None
 
-    return (total_loss     / n_batches,
-            total_miou     / n_batches,
-            total_dir_loss / n_batches)
+    return (total_loss / n_batches, total_miou / n_batches)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -216,9 +185,7 @@ def main():
     train_loader, val_loader = make_loaders(
         args.data_root,
         batch_size       = args.batch_size,
-        num_workers      = args.num_workers,
-        json_path        = args.json_path,
-        orientation_path = args.orientation_path
+        num_workers      = args.num_workers
     )
 
     # ── Model ──────────────────────────────────────────────────────────────────
@@ -301,31 +268,27 @@ def main():
         print(f"Epoch {epoch+1}/{args.epochs}  "
               f"LR=[enc={current_lrs[0]}, dec={current_lrs[1]}]")
 
-        train_loss, train_miou, train_dir_loss = train_one_epoch(
+        train_loss, train_miou = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, device, use_amp, limit=args.limit_train_batches
         )
-        val_loss, val_miou, val_dir_loss = validate(
+        val_loss, val_miou = validate(
             model, val_loader, criterion, device, use_amp, limit=args.limit_val_batches
         )
 
         elapsed = time.time() - t0
         print(f"Epoch {epoch+1} — {elapsed:.0f}s | "
               f"train loss={train_loss:.4f}  "
-              f"miou={train_miou:.4f}  "
-              f"dir_loss={train_dir_loss:.4f} | "
+              f"miou={train_miou:.4f} | "
               f"val loss={val_loss:.4f}  "
-              f"val_miou={val_miou:.4f}  "
-              f"val_dir_loss={val_dir_loss:.4f}")
+              f"val_miou={val_miou:.4f}")
 
         # ── Checkpointing ──────────────────────────────────────────────────────
         record = {
             "epoch"          : epoch,
             "train_loss"     : train_loss,
             "train_miou"     : train_miou,
-            "train_dir_loss" : train_dir_loss,
             "val_loss"       : val_loss,
             "val_miou"       : val_miou,
-            "val_dir_loss"   : val_dir_loss,
         }
         history.append(record)
 

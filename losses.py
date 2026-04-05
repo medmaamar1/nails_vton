@@ -52,31 +52,8 @@ class SoftDiceLoss(nn.Module):
         return 1.0 - dice.mean()  # Loss = 1 - Dice Score
 
 
-# ── Direction Loss ────────────────────────────────────────────────────────────
+# ── Direction Loss (Removed) ──────────────────────────────────────────────────
 
-class DirectionLoss(nn.Module):
-    def forward(self, pred_dir, target_dir, valid_mask):
-        """
-        pred_dir   : (B, 2, H, W)
-        target_dir : (B, 2, H, W) normalized
-        valid_mask : (B, 1, H, W) float
-        
-        Strict Equation 3 (arXiv:1906.02222): 1/(H*W) * sum(||u_pred - u_target||^2)
-        Penalized ONLY in the annotated fingernail area.
-        """
-        B, C, H, W = pred_dir.shape
-        diff  = pred_dir - target_dir
-        l2_sq = (diff ** 2).sum(dim=1)  # (B, H, W)
-        
-        valid_sq = (valid_mask.squeeze(1) > 0.5).float()
-        l2_sq_masked = l2_sq * valid_sq
-        
-        # Precise Equation 3: 1/(H*W) * sum(||u_pred - u_target||^2)
-        # Penalized only in foreground, but divided by total area (B*H*W).
-        return l2_sq_masked.sum() / (B * H * W)
-
-
-# ── Binary Segmentation Loss ──────────────────────────────────────────────────
 
 # ── Sobel Edge Loss (forces sharp boundaries) ─────────────────────────────────
 
@@ -144,52 +121,35 @@ class NailVTONLoss(nn.Module):
     """
     def __init__(self, lmp_ratio=0.15, dice_alpha=0.5):
         super().__init__()
-        self.binary_loss    = BinarySegLoss(keep_ratio=lmp_ratio, alpha=dice_alpha)
-        self.direction_loss = DirectionLoss()
+        self.binary_loss = BinarySegLoss(keep_ratio=lmp_ratio, alpha=dice_alpha)
 
-    def _get_target_level(self, t_bin, t_dir, size):
-        """Linearly interpolate targets to match the scale of the pyramid level."""
+    def _get_target_level(self, t_bin, size):
+        """Linearly interpolate target mask to match the scale of the pyramid level."""
         H, W = size
         bin_t  = F.interpolate(t_bin, size=(H, W), mode="nearest")
-        # Direction field is float32 vectors, should use bilinear interpolation
-        dir_t  = F.interpolate(t_dir, size=(H, W), mode="bilinear", align_corners=False)
-        
-        # Norm dir_t after interpolation using broadcasting
-        norm  = dir_t.norm(dim=1, keepdim=True)
-        dir_t = dir_t / norm.clamp(min=1e-6)
-
-        return {"binary_mask": bin_t, "direction_field": dir_t}
+        return {"binary_mask": bin_t}
 
     def forward(self, multi_predictions, targets):
         """
-        multi_predictions: list of tuples (binary, direction)
+        multi_predictions: list of binary logits
+        targets: (B, 1, H, W)
         """
         total_loss = 0.0
         details = {}
 
-        for i, preds in enumerate(multi_predictions):
-            p_bin, p_dir = preds
+        for i, p_bin in enumerate(multi_predictions):
             h, w = p_bin.shape[-2:]
             
-            # Phase 6: targets is a 3-tuple (img_t, bin_t, dir_t)
-            t_bin, t_dir = targets[1], targets[2]
-            
             # Prepare targets for this resolution
-            target_lvl = self._get_target_level(t_bin, t_dir, (h, w))
-            valid_mask = target_lvl["binary_mask"]  # Foreground mask
+            target_lvl = self._get_target_level(targets, (h, w))
             
-            l_bin  = self.binary_loss(p_bin, target_lvl["binary_mask"])
-            l_dir  = self.direction_loss(p_dir, target_lvl["direction_field"], valid_mask)
-            
-            l_lvl = l_bin + l_dir
-            total_loss += l_lvl
+            l_bin = self.binary_loss(p_bin, target_lvl["binary_mask"])
+            total_loss += l_bin
             
             # Phase 4 Lockdown: Explicitly detach and copy to CPU item
-            details[f"l{i}_total"] = l_lvl.detach().cpu().item()
-            details[f"l_bin_{i}"]   = l_bin.detach().cpu().item()
-            details[f"l_dir_{i}"]   = l_dir.detach().cpu().item()
+            details[f"l{i}_total"] = l_bin.detach().cpu().item()
+            details[f"l_bin_{i}"]  = l_bin.detach().cpu().item()
 
-        details["l2_dir"]     = float(sum(details[f"l_dir_{i}"] for i in range(len(multi_predictions))) / len(multi_predictions))
         details["loss_total"] = total_loss.detach().cpu().item()
         return total_loss, details
 
@@ -234,10 +194,8 @@ if __name__ == "__main__":
     dummy = torch.randn(2, 3, 512, 512)
     outs = model(dummy)
     
-    targets = {
-        "binary_mask": (torch.rand(2, 1, 512, 512) > 0.8).float(),
-        "direction_field": torch.randn(2, 2, 512, 512)
-    }
+    # Just a target mask now
+    targets = (torch.rand(2, 1, 512, 512) > 0.8).float()
     
     criterion = NailVTONLoss()
     total, logs = criterion(outs, targets)

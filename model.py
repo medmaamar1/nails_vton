@@ -55,13 +55,12 @@ class CFF(nn.Module):
 class PyramidHeads(nn.Module):
     def __init__(self, in_ch):
         super().__init__()
-        self.shared    = DepthwiseSeparable(in_ch, 10)
-        self.binary    = nn.Conv2d(10, 2, 1)
-        self.direction = nn.Conv2d(10, 2, 1)
+        self.shared = DepthwiseSeparable(in_ch, 10)
+        self.binary = nn.Conv2d(10, 2, 1)
 
     def forward(self, x):
         shared_feat = self.shared(x)
-        return self.binary(shared_feat), self.direction(shared_feat)
+        return self.binary(shared_feat)
 
 
 # ── MobileNetV3-Large prefix encoder ──────────────────────────────────────────
@@ -152,37 +151,29 @@ class NailVTONModel(nn.Module):
             feat_low_s4, feat_low_s8 = self.encoder_low(x_half)
 
         # Level 0 – low-resolution side-output
-        f0               = self.fusion_low(feat_low_s8, feat_low_s4)
-        out0_bin, out0_dir = self.head_l0(f0)
+        f0       = self.fusion_low(feat_low_s8, feat_low_s4)
+        out0_bin = self.head_l0(f0)
 
         # Level 1 – high-resolution side-output
-        f1               = self.fusion_high(f0, feat_high)
-        out1_bin, out1_dir = self.head_l1(f1)
+        f1       = self.fusion_high(f0, feat_high)
+        out1_bin = self.head_l1(f1)
 
         # Final – upsampled to full resolution
-        out2_bin, out2_dir = self.head_final(f1)
-
-        def _norm_dir(d):
-            return d / d.norm(dim=1, keepdim=True).clamp(min=1e-6)
-
-        p0 = (out0_bin, _norm_dir(out0_dir))
-        p1 = (out1_bin, _norm_dir(out1_dir))
+        out2_bin = self.head_final(f1)
 
         final_bin = F.interpolate(out2_bin, size=(self.image_size, self.image_size),
                                   mode="bilinear", align_corners=False)
-        final_dir = F.interpolate(out2_dir, size=(self.image_size, self.image_size),
-                                  mode="bilinear", align_corners=False)
-        pf = (final_bin, _norm_dir(final_dir))
 
-        return [p0, p1, pf]
+        # Phase 4 Simplification: Return ONLY Binary Masks
+        return [out0_bin, out1_bin, final_bin]
 
     @torch.no_grad()
     def predict(self, x, binary_thresh=0.5):
         self.eval()
         multi_preds = self(x)
-        final_bin, final_dir = multi_preds[-1]
+        final_bin = multi_preds[-1]
         prob_fg = torch.softmax(final_bin, dim=1)[:, 1:2]
-        return (prob_fg > binary_thresh, final_dir)
+        return prob_fg > binary_thresh
 
     def count_parameters(self):
         total     = sum(p.numel() for p in self.parameters())
@@ -201,7 +192,7 @@ if __name__ == "__main__":
     outs  = model(dummy)
 
     print(f"Laplacian levels: {len(outs)}")
-    for i, (b, d) in enumerate(outs):
-        print(f"  Level {i}: bin={b.shape}, dir={d.shape}")
+    for i, b in enumerate(outs):
+        print(f"  Level {i}: bin={b.shape}")
 
-    print("\nModel Architecture Check PASSED")
+    print("\nModel Architecture Check PASSED ✓")
