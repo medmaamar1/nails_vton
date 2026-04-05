@@ -166,8 +166,12 @@ class NailDataset(Dataset):
         img_path  = self.id_to_path[image_id]
         anns      = self.id_to_anns[image_id]
 
-        # ── Load image ────────────────────────────────────────────────────────
+        # ── Load image and FORCE GRAYSCALE (Agnostic Push) ────────────────────
         image     = Image.open(img_path).convert("RGB")
+        # 100% Agnostic: Convert to grayscale but keep 3 identical channels 
+        # so MobileNetV3-Large pretrained weights still work.
+        image     = TF.to_grayscale(image, num_output_channels=3)
+        
         orig_w, orig_h = image.size
 
         # ── Build per-nail masks at original resolution ───────────────────────
@@ -192,7 +196,6 @@ class NailDataset(Dataset):
             m_resized = m.resize((self.image_size, self.image_size), Image.NEAREST)
             masks_resized.append(m_resized)
             bboxes_resized.append([x * sx, y * sy, w * sx, h * sy])
-            # Explicitly close original to save RAM
             m.close()
 
         del masks_pil
@@ -215,8 +218,6 @@ class NailDataset(Dataset):
 
         # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
-        
-        # Get orientation mapping for this image if loaded
         img_orientations = self.orientations.get(str(image_id), {}) if hasattr(self, 'orientations') else {}
 
         for m, bbox, ann in zip(masks_resized, bboxes_resized, anns):
@@ -226,40 +227,24 @@ class NailDataset(Dataset):
             if ann_id_str in img_orientations:
                 # Use ground-truth orientation [dx, dy]
                 dx, dy = img_orientations[ann_id_str]
+                if h_flipped: dx = -dx
+                if v_flipped: dy = -dy
                 
-                # Adjust orientation if spatial augmentations were applied
-                if h_flipped:
-                    dx = -dx
-                if v_flipped:
-                    dy = -dy
-                
-                # Create a uniform directional vector for the foreground area
                 vector_field = np.zeros((2, S, S), dtype=np.float32)
                 vector_field[0, mask_np > 0] = dx
                 vector_field[1, mask_np > 0] = dy
                 dir_np += vector_field
-            else:
-                pass # Strict compliance: do not default to geometry
 
-        # Re-normalise pixels touched by >1 nail (overlap edge case)
         norm  = np.sqrt(dir_np[0] ** 2 + dir_np[1] ** 2)
         valid = norm > 1e-6
         dir_np[0, valid] /= norm[valid]
         dir_np[1, valid] /= norm[valid]
-        dir_t = torch.from_numpy(dir_np).clone()                       # (2, H, W)
+        dir_t = torch.from_numpy(dir_np).clone()
 
-        # Cleanup explicitly to prevent multiprocess IPC leaks
         image.close()
-        for m in masks_resized:
-            m.close()
+        for m in masks_resized: m.close()
 
-        # Phase 6 Lockdown: Minimal 3-tensor Tuple (img, bin, dir)
-        # Bypasses all hidden collation caches.
-        return (
-            img_t.clone().detach(),
-            binary_t.clone().detach(),
-            dir_t.clone().detach()
-        )
+        return (img_t.clone().detach(), binary_t.clone().detach(), dir_t.clone().detach())
 
     # ── Augmentation ──────────────────────────────────────────────────────────
 
@@ -278,27 +263,21 @@ class NailDataset(Dataset):
             masks = [TF.vflip(m) for m in masks]
             v_flipped = True
 
-        # ── Random Crop & Zoom (fixes single-finger failures) ─────────────────
-        # 50% chance: crop a random portion and resize back.
-        # This simulates close-up shots of 1-2 nails.
+        # ── Random Crop & Zoom ────────────────────────────────────────────────
         if random.random() > 0.5:
-            scale = random.uniform(0.6, 1.0)  # Zoom into 60%-100% of image
+            scale = random.uniform(0.6, 1.0)
             crop_size = int(S * scale)
             top  = random.randint(0, S - crop_size)
             left = random.randint(0, S - crop_size)
             image = TF.resized_crop(image, top, left, crop_size, crop_size, (S, S), Image.BILINEAR)
             masks = [TF.resized_crop(m, top, left, crop_size, crop_size, (S, S), Image.NEAREST) for m in masks]
 
-        # ── Aggressive Color Jitter (fixes colored nail failures) ─────────────
-        # Wide hue range: forces model to learn shape/edge NOT color.
+        # ── Intensity Jitter (Agnostic version) ───────────────────────────────
+        # Brightness and Contrast are still vital for edge detection in grayscale.
+        # Saturation and Hue are now irrelevant as input is already grayscale.
         image = TF.adjust_brightness(image, 1 + random.uniform(-0.35, 0.35))
         image = TF.adjust_contrast(image,   1 + random.uniform(-0.35, 0.35))
-        image = TF.adjust_saturation(image, 1 + random.uniform(-0.5,  0.5))
-        image = TF.adjust_hue(image,            random.uniform(-0.5,  0.5))  # Full spectrum
-
-        # ── Grayscale (10% chance — forces edge/texture learning) ─────────────
-        if random.random() > 0.9:
-            image = TF.to_grayscale(image, num_output_channels=3)
+        
         return image, masks, h_flipped, v_flipped
 
 

@@ -78,23 +78,61 @@ class DirectionLoss(nn.Module):
 
 # ── Binary Segmentation Loss ──────────────────────────────────────────────────
 
+# ── Sobel Edge Loss (forces sharp boundaries) ─────────────────────────────────
+
+class SobelEdgeLoss(nn.Module):
+    """
+    Calculates the difference in image gradients (edges) between prediction and truth.
+    Forces the model to align the 'cuticle line' curve perfectly.
+    """
+    def __init__(self):
+        super().__init__()
+        # Sobel kernels: 1x1x3x3
+        kx = torch.tensor([[[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]]], dtype=torch.float32)
+        ky = torch.tensor([[[[-1, -2, -1], [0, 0, 0], [1, 2, 1]]]], dtype=torch.float32)
+        self.register_buffer('kx', kx)
+        self.register_buffer('ky', ky)
+
+    def _get_edges(self, x):
+        # x is (B, 1, H, W)
+        gx = F.conv2d(x, self.kx, padding=1)
+        gy = F.conv2d(x, self.ky, padding=1)
+        return torch.sqrt(gx**2 + gy**2 + 1e-6)
+
+    def forward(self, logits, targets):
+        # prob_fg is (B, 1, H, W)
+        prob_fg = torch.softmax(logits, dim=1)[:, 1:2]
+        pred_edges = self._get_edges(prob_fg)
+        true_edges = self._get_edges(targets.float())
+        return F.mse_loss(pred_edges, true_edges)
+
+
+# ── Binary Segmentation Loss ──────────────────────────────────────────────────
+
 class BinarySegLoss(nn.Module):
     """
-    Combined NLL-LMP + Soft Dice Loss.
-    - NLL-LMP: Fixes hard pixels (knuckles, palm edges).
-    - Dice: Fixes patchiness and holes inside the nail region.
-    alpha=0.5 balances the two equally.
+    Combined NLL-LMP + Soft Dice Loss + Sobel Edge Loss.
+    - NLL-LMP (40%): Fixes hard pixels (background mistakes).
+    - Dice (40%): Fixes connectivity and holes.
+    - Edge (20%): Fixes high-precision boundary alignment.
     """
-    def __init__(self, keep_ratio=0.15, alpha=0.5):
+    def __init__(self, keep_ratio=0.15, alpha=0.4, beta=0.2):
         super().__init__()
         self.lmp   = LMPLoss(keep_ratio=keep_ratio)
         self.dice  = SoftDiceLoss()
-        self.alpha = alpha
+        self.edge  = SobelEdgeLoss()
+        self.alpha = alpha # Weight for Dice
+        self.beta  = beta  # Weight for Edge
 
     def forward(self, logits, targets):
         l_nll  = self.lmp(logits, targets)
         l_dice = self.dice(logits, targets)
-        return (1.0 - self.alpha) * l_nll + self.alpha * l_dice
+        l_edge = self.edge(logits, targets)
+        
+        # Weighted sum: (1 - alpha - beta) * NLL + alpha * Dice + beta * Edge
+        # Default: 0.4*NLL + 0.4*Dice + 0.2*Edge
+        gamma = 1.0 - self.alpha - self.beta
+        return gamma * l_nll + self.alpha * l_dice + self.beta * l_edge
 
 
 
