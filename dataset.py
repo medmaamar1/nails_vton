@@ -143,7 +143,41 @@ class NailDataset(Dataset):
             kernel = random.choice([3, 5])
             img = TF.gaussian_blur(img, kernel_size=(kernel, kernel))
 
+        # Texture-Invariance: Vandalize the nail area with noise/patterns
+        if random.random() > 0.5:
+            img = self._vandalize_texture(img, msk)
+
         return img, msk
+
+    def _vandalize_texture(self, img, msk):
+        """
+        Injects random noise/patterns strictly inside the nail mask.
+        Forces the model to be 'Texture-Blind' and focus on the cuticle edge.
+        """
+        img_np = np.array(img).astype(np.float32)
+        msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
+        
+        # Create a noise pattern
+        h, w, c = img_np.shape
+        noise_type = random.choice(["gauss", "stripes", "block"])
+        
+        if noise_type == "gauss":
+            noise = np.random.normal(0, 50, (h, w, c))
+        elif noise_type == "stripes":
+            noise = np.zeros((h, w, c))
+            for x in range(0, w, random.randint(2, 6)):
+                noise[:, x:x+2, :] = random.randint(-100, 100)
+        else: # block
+            noise = np.zeros((h, w, c))
+            for _ in range(10):
+                r, c_ = random.randint(0, h-20), random.randint(0, w-20)
+                noise[r:r+20, c_:c_+20, :] = random.randint(-150, 150)
+
+        # Apply noise ONLY inside the mask
+        mask_3d = np.expand_dims(msk_np, axis=-1)
+        img_np = img_np * (1 - mask_3d) + (img_np + noise) * mask_3d
+        
+        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────

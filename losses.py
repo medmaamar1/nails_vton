@@ -4,34 +4,39 @@ Nail VTON Loss Functions
 Single-task binary segmentation only. Direction loss removed.
 
 Active losses:
-  LMPLoss        — NLL with top-K hard pixel mining
+  TverskyLoss    — Heavily penalizes False Positives (Ghost-Buster)
   SoftDiceLoss   — Penalises holes and patchy masks
   SobelEdgeLoss  — Forces sharp, precise cuticle boundaries
-  BinarySegLoss  — Combined: 0.4*NLL + 0.4*Dice + 0.2*Edge
+  BinarySegLoss  — Combined: 20% Tversky + 40% Dice + 40% Edge
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ── Loss Max-Pooling ───────────────────────────────────────────────────────────
+# ── Tversky Loss (The Ghost-Buster) ─────────────────────────────────────────────
 
-class LMPLoss(nn.Module):
-    """Top-K hard pixel NLL. Keeps only the 15% hardest pixels per batch."""
-    def __init__(self, keep_ratio=0.15):
+class TverskyLoss(nn.Module):
+    """
+    A generalization of Dice loss.
+    alpha=0.3, beta=0.7 -> Heavily penalizes False Positives (Ghost Nails).
+    """
+    def __init__(self, alpha=0.3, beta=0.7, eps=1e-6):
         super().__init__()
-        self.keep_ratio = keep_ratio
+        self.alpha = alpha
+        self.beta  = beta
+        self.eps   = eps
 
     def forward(self, logits, targets):
-        # logits : (B, 2, H, W)
-        # targets: (B, 1, H, W) float32  {0.0, 1.0}
-        targets_long = targets.squeeze(1).long()                      # (B, H, W)
-        loss_map     = F.cross_entropy(logits, targets_long, reduction="none")
-        B            = loss_map.shape[0]
-        loss_flat    = loss_map.view(B, -1)
-        k            = max(1, int(loss_flat.size(1) * self.keep_ratio))
-        top_k, _     = loss_flat.topk(k, dim=1)
-        return top_k.mean()
+        probs = torch.softmax(logits, dim=1)[:, 1]  # (B, H, W)
+        target = targets.squeeze(1).float()          # (B, H, W)
+
+        tp = (probs * target).sum(dim=(-2, -1))
+        fn = ((1 - probs) * target).sum(dim=(-2, -1))
+        fp = (probs * (1 - target)).sum(dim=(-2, -1))
+
+        tversky = (tp + self.eps) / (tp + self.alpha * fn + self.beta * fp + self.eps)
+        return 1.0 - tversky.mean()
 
 
 # ── Soft Dice Loss ─────────────────────────────────────────────────────────────
@@ -82,30 +87,29 @@ class SobelEdgeLoss(nn.Module):
 
 class BinarySegLoss(nn.Module):
     """
-    20% NLL-LMP  — focus ONLY on the worst 5% (Ghost-Busting hallucinations)
+    20% Tversky Loss — focus ONLY on False Positives (Ghost-Busting)
     40% Soft Dice — overall mask connectivity
     40% Sobel Edge — sharp cuticle boundary lock-on
     """
-    def __init__(self, keep_ratio=0.05, alpha=0.4, beta=0.4):
+    def __init__(self, alpha=0.3, beta=0.7, edge_weight=0.4, dice_weight=0.4):
         super().__init__()
-        self.lmp   = LMPLoss(keep_ratio=keep_ratio)
-        self.dice  = SoftDiceLoss()
-        self.edge  = SobelEdgeLoss()
-        self.alpha = alpha  # Dice weight = 0.4
-        self.beta  = beta   # Edge weight = 0.4
+        self.tversky = TverskyLoss(alpha=alpha, beta=beta)
+        self.dice    = SoftDiceLoss()
+        self.edge    = SobelEdgeLoss()
+        self.alpha_w = dice_weight
+        self.beta_w  = edge_weight
 
     def forward(self, logits, targets):
         # logits : (B, 2, H, W)
         # targets: (B, 1, H, W) float32
-        l_nll  = self.lmp(logits, targets)
-        l_dice = self.dice(logits, targets)
-        l_edge = self.edge(logits, targets)
+        l_tversky = self.tversky(logits, targets)
+        l_dice    = self.dice(logits, targets)
+        l_edge    = self.edge(logits, targets)
         
-        gamma  = 1.0 - self.alpha - self.beta  # NLL weight = 0.2
-        loss   = gamma * l_nll + self.alpha * l_dice + self.beta * l_edge
+        gamma_w   = 1.0 - self.alpha_w - self.beta_w  # Tversky weight = 0.2
+        loss      = gamma_w * l_tversky + self.alpha_w * l_dice + self.beta_w * l_edge
         
         # Background-Only Penalty: If the image has zero nail pixels, punish FPs double
-        # This helps eliminate 'Ghost Nails' on knuckles/palms.
         with torch.no_grad():
             is_empty_batch = targets.sum() == 0
         if is_empty_batch:
@@ -138,17 +142,3 @@ def compute_miou(logits, targets, threshold=0.5, eps=1e-6):
     iou_bg = (i_bg + eps) / (u_bg + eps)
 
     return ((iou_fg + iou_bg) / 2.0).mean().item()
-
-
-# ── Sanity check ───────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    criterion = BinarySegLoss()
-    logits  = torch.randn(2, 2, 448, 448)
-    targets = (torch.rand(2, 1, 448, 448) > 0.8).float()
-    loss    = criterion(logits, targets)
-    miou    = compute_miou(logits, targets)
-    print(f"Loss : {loss.item():.4f}")
-    print(f"mIoU : {miou:.4f}")
-    assert not torch.isnan(loss), "NaN detected in loss!"
-    print("Loss sanity check PASSED ✓")
