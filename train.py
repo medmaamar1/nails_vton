@@ -74,21 +74,9 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
     total_miou     = 0.0
     total_dir_loss = 0.0
     n_batches      = len(loader) if limit is None else min(len(loader), limit)
-    loader_iter    = iter(loader)
-    for i in range(n_batches):
-        # Iterator Recycling: Force-purge zombie references
-        if i > 0 and i % 50 == 0:
-            del loader_iter
-            gc.collect(2)
-            torch.cuda.empty_cache()
-            loader_iter = iter(loader)
-            for _ in range(i): next(loader_iter)
 
-        try:
-            batch = next(loader_iter)
-        except StopIteration:
-            break
-
+    for i, batch in enumerate(loader):
+        # ── Data Transfer ──────────────────────────────────────────────────────
         # Phase 6: targets is now a 3-tuple (img, bin, dir)
         # BARE MINIMUM GPU TRANSFER
         image   = batch[0].to(device, non_blocking=True)
@@ -97,7 +85,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             batch[1].to(device, non_blocking=True), # binary_mask
             batch[2].to(device, non_blocking=True)  # direction_field
         )
-        batch = None # Kill CPU batch immediately
+        # Kill CPU batch immediately to free RAM
+        del batch
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -130,16 +119,18 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         # ── Surgical Nullification (BEFORE logging to ensure GC sees freed tensors) ──
         # preds = [(bin0,dir0), (bin1,dir1), (bin2,dir2)]
         # Must destroy each inner tuple explicitly — setting preds=None only kills the list
-        for (b, d) in preds:
-            del b, d
-        del preds
-        preds       = None
+        if preds is not None:
+            for (b, d) in preds:
+                del b, d
+            del preds
+            preds = None
+        
         image       = None
         targets     = None
         loss        = None
         loss_dict   = None
 
-        # Run GC every 10 steps (not just in logging block) to prevent accumulation
+        # Run GC every 10 steps to prevent fragmentation
         if (i + 1) % 10 == 0:
             gc.collect(1)
 
