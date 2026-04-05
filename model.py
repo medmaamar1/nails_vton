@@ -49,11 +49,12 @@ class MobileNetV3LargePrefix(nn.Module):
     Encapsulates a prefix of a MobileNetV3-Large backbone.
 
     Verified stage indices (probed via forward pass on 224x224 low-res input):
-      features[ 4]: 40ch  @ 28x28 = H/8  of low-res = H/16 of original  <- s4 skip
       features[ 6]: 40ch  @ 28x28 = H/8  of low-res = H/16 of original  <- split_idx=7
       features[12]: 112ch @ 14x14 = H/16 of low-res = H/32 of original  <- last before stride-2
-      features[13]: 160ch @  7x7  = H/32 of low-res = surgery target
-      After surgery: features[13] outputs 160ch @ 14x14 = H/16 of original
+      features[13]: 160ch @  7x7  = surgery target (stride 2->1, dilation 2)
+      features[14]: 160ch @ 14x14 = stride-1, runs at H/16 of orig post-surgery
+      features[15]: 160ch @ 14x14 = stride-1, runs at H/16 of orig post-surgery
+      features[16]: 960ch @ 14x14 = 1x1 expansion, FULL backbone power
     """
     def __init__(self, split_idx=None, pretrained=True, surgery=False):
         super().__init__()
@@ -62,11 +63,11 @@ class MobileNetV3LargePrefix(nn.Module):
         backbone = models.mobilenet_v3_large(weights=weights)
 
         if surgery:
-            # Include features[0:14] (0 through 13 inclusive).
-            # features[13].block.1.0 is the 5x5 depthwise conv with stride=2.
-            # Surgery: stride 2->1, dilation 1->2, padding 2->4.
-            # After surgery: features[13] outputs 160ch @ H/16 of original (not H/32).
-            self.features = nn.Sequential(*backbone.features[:14])
+            # Include features[0:17] — the full V3-Large feature extractor.
+            # Surgery ONLY on features[13].block.1.0 (5x5 depthwise, stride 2->1).
+            # Features [14], [15] are stride-1 so they run at H/16 of orig automatically.
+            # Features [16] is the 1x1 960ch expansion — runs at H/16 of orig.
+            self.features = nn.Sequential(*backbone.features[:17])
             dw = self.features[13].block[1][0]
             dw.stride   = (1, 1)
             dw.dilation = (2, 2)
@@ -81,9 +82,10 @@ class MobileNetV3LargePrefix(nn.Module):
             return self.features(x)
 
         # Low-res path: split for H/16 skip-connection (Section 3.2)
-        feat_s4    = self.features[:self.split_idx](x)    # 40ch @ H/16 of orig
-        feat_final = self.features[self.split_idx:](feat_s4) # 160ch @ H/16 of orig
+        feat_s4    = self.features[:self.split_idx](x)    # 40ch  @ H/16 of orig
+        feat_final = self.features[self.split_idx:](feat_s4) # 960ch @ H/16 of orig
         return feat_s4, feat_final
+
 
 
 class PyramidHeads(nn.Module):
@@ -110,9 +112,9 @@ class NailVTONModel(nn.Module):
         self.image_size = image_size
 
         # TWO independent encoders (no weight sharing) — paper Section 3.2
-        # Low-res encoder: receives H/2 input, uses V3-Large features[0:14] with surgery.
+        # Low-res encoder: receives H/2 input, uses FULL V3-Large features[0:17] with surgery.
         #   split_idx=7 gives 40ch skip at H/16 of original (s4).
-        #   Remainder (features[7:14] with surgery) gives 160ch at H/16 of orig (s8).
+        #   Remainder goes through features[7:17] including the 960ch expansion.
         self.encoder_low  = MobileNetV3LargePrefix(split_idx=7, pretrained=pretrained, surgery=True)
         # High-res encoder: receives full H input, uses V3-Large features[0:5].
         #   Output: 40ch at H/8 of original.
@@ -120,7 +122,7 @@ class NailVTONModel(nn.Module):
 
         HIGH_CH   = 40   # V3-Large features[4] output channels (H/8 of orig)
         LOW_S4_CH = 40   # V3-Large features[6] output channels (H/16 of orig, skip)
-        LOW_S8_CH = 160  # V3-Large features[13] output channels (H/16 of orig, post-surgery)
+        LOW_S8_CH = 960  # V3-Large features[16] 960ch expansion (H/16 of orig, post-surgery)
         FUSE      = 320  # CFF output — kept at 320 to preserve paper's decoder capacity
 
         # Fusion 0: stage_low8 (H/16) fused with stage_low4 (H/16) upsampled
