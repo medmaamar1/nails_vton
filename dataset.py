@@ -95,31 +95,29 @@ class NailDataset(Dataset):
             coco = json.load(f)
 
         self.id_to_anns = {}
+        orientation_hits = 0
         for ann in coco["annotations"]:
             aid = ann["image_id"]
-            
-            # STRICT FILTER: only keep annotations that have a matching orientation
             aid_str = str(aid)
             ann_id_str = str(ann.get("id", ""))
             
-            if aid_str not in self.orientations:
-                continue
-            if ann_id_str not in self.orientations[aid_str]:
-                continue
-
+            # Record annotation even if orientation is missing (for segmentation-only)
             self.id_to_anns.setdefault(aid, [])
-            # Forensic memory reduction: only keep segmentation points, bbox, and id
+            
+            has_orient = (aid_str in self.orientations and ann_id_str in self.orientations[aid_str])
+            if has_orient:
+                orientation_hits += 1
+
             self.id_to_anns[aid].append({
                 "id": ann.get("id"),
                 "segmentation": ann.get("segmentation", []),
-                "bbox": ann.get("bbox", [0,0,0,0])
+                "bbox": ann.get("bbox", [0,0,0,0]),
+                "has_orientation": has_orient
             })
 
         self.image_ids  = []
         self.id_to_path = {}
 
-        # Look in the root and 'images' subfolder for each image in the JSON
-        # This is surgically precise and avoids scanning thousands of unrelated files.
         root_str    = str(self.root)
         images_str  = str(self.root / "images")
 
@@ -127,15 +125,11 @@ class NailDataset(Dataset):
             iid   = img["id"]
             fname = img["file_name"]
             
-            # STRICT FILTER: Skip if this image wasn't found in mp_orientations
-            if str(iid) not in self.orientations:
-                continue
-
-            # SUBSET FILTER: Skip if not in the requested subset (for subject-aware split)
+            # SUBSET FILTER: Skip if not in the requested subset
             if subset_ids is not None and iid not in subset_ids:
                 continue
 
-            # Skip if no valid annotations left after orientation filtering
+            # Skip if no annotations at all
             if iid not in self.id_to_anns or not self.id_to_anns[iid]:
                 continue
 
