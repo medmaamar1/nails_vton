@@ -26,6 +26,7 @@ import torchvision.transforms.functional as TF
 IMAGE_SIZE    = 448
 MEAN          = [0.485, 0.456, 0.406]
 STD           = [0.229, 0.224, 0.225]
+DATA_ROOT     = "/kaggle/input/datasets/maamarmohamed/nail-segmentation/train"
 
 
 
