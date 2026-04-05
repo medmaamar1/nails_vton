@@ -31,7 +31,7 @@ from losses  import NailVTONLoss, compute_miou
 
 def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
-    p.add_argument("--data_root",   default="/kaggle/input/datasets/almohamed132/nails-vton/train")
+    p.add_argument("--data_root",   default="/kaggle/input/datasets/maamarmohamed/nail-segmentation/train")
     p.add_argument("--json_path",   default=None, help="Explicit path to annotations (optional)")
     p.add_argument("--epochs",      type=int,   default=100)
     p.add_argument("--batch_size",  type=int,   default=32)
@@ -44,7 +44,7 @@ def parse_args():
     p.add_argument("--warmup_epochs", type=int, default=5,
                    help="Linear LR warmup before cosine decay kicks in")
 
-    p.add_argument("--orientation_path", default="/kaggle/input/datasets/almohamed132/nails-orientation/mp_orientations_v1.json", 
+    p.add_argument("--orientation_path", default="/kaggle/input/datasets/maamarmohamed/oriented-nails/mp_orientations_v1.json", 
                    help="Path to mp_orientations_v1.json for strict orientation filtering")
     
     p.add_argument("--limit_train_batches", type=int, default=None,
