@@ -153,20 +153,22 @@ class NailDataset(Dataset):
     def _vandalize_texture(self, img, msk):
         """
         Injects random noise/patterns/solid colors strictly inside the nail mask.
-        Forces the model to be 'Texture-Blind' and focus on the cuticle edge.
+        Uses Alpha Blending to ensure colors feel like 'coatings' (non-opaque).
         """
         img_np = np.array(img).astype(np.float32)
         msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
         
-        # Create a noise pattern (Simulating real manicures: Red/Blue/Dots/French)
+        # Create a noise pattern (Simulating real manicures)
         h, w, c = img_np.shape
         noise_type = random.choice(["gauss", "stripes", "dots", "french", "gradient", "solid"])
         noise = np.zeros((h, w, c))
+        alpha = random.uniform(0.4, 0.9) # Transparency level
         
         if noise_type == "solid":
-            # Paint the nail a pure solid random color (Red, Black, Blue, etc.)
+            # Semi-transparent Solid Color
             color = np.random.randint(0, 256, (3,))
-            img_np[msk_np > 0.5] = color
+            mask_3d = np.expand_dims(msk_np, axis=-1)
+            img_np = img_np * (1 - mask_3d * alpha) + (color * mask_3d * alpha)
             return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
         if noise_type == "gauss":
@@ -179,17 +181,15 @@ class NailDataset(Dataset):
                 r, c_ = random.randint(0, h-1), random.randint(0, w-1)
                 noise[r-5:r+5, c_-5:c_+5, :] = random.randint(-200, 200)
         elif noise_type == "french":
-            # Simulate a French Tip or Gradient Tip
             noise[int(h*0.6):, :, :] = random.randint(-200, 200)
         elif noise_type == "gradient":
             grid = np.linspace(0, random.randint(-150, 150), h)
             for ch in range(c):
                 noise[:, :, ch] = grid[:, np.newaxis]
 
-        # Apply noise ONLY inside the mask
+        # Apply noise ONLY inside the mask with Alpha Blending
         mask_3d = np.expand_dims(msk_np, axis=-1)
-        # Apply additive and subtractive changes to simulate 'colors' in grayscale
-        img_np = img_np * (1 - mask_3d) + (img_np + noise) * mask_3d
+        img_np = img_np * (1 - mask_3d * alpha) + (img_np + noise) * (mask_3d * alpha)
         
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
