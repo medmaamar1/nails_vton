@@ -350,10 +350,10 @@ def make_loaders(dataset_root, batch_size=8, num_workers=4, val_split=0.1, json_
                              orientation_path=orientation_path, subset_ids=set(val_ids))
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=2, pin_memory=False,
+                              num_workers=num_workers, pin_memory=False,
                               drop_last=True, persistent_workers=False)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                              num_workers=2, pin_memory=False,
+                              num_workers=num_workers, pin_memory=False,
                               persistent_workers=False)
     return train_loader, val_loader
 
