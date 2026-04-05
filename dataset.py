@@ -144,8 +144,8 @@ class NailDataset(Dataset):
             img = TF.gaussian_blur(img, kernel_size=(kernel, kernel))
 
         # Texture-Invariance: Vandalize the nail area with noise/patterns
-        # 15% Sane (Clean) / 85% Randomized (Vandalized)
-        if random.random() > 0.15:
+        # 50% Sane (Clean) / 50% Randomized (Vandalized)
+        if random.random() > 0.5:
             img = self._vandalize_texture(img, msk)
 
         return img, msk
