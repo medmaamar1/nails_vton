@@ -33,11 +33,12 @@ DATA_ROOT     = "/kaggle/input/datasets/maamarmohamed/nail-segmentation/train"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def polygon_to_mask(polygon, height, width):
-    """Flat COCO polygon [x1,y1,x2,y2,...] → binary PIL mask."""
+def polygon_to_mask(polygon, height, width, offset_x=0, offset_y=0):
+    """Flat COCO polygon [x1,y1,x2,y2,...] → binary PIL mask with padding offset."""
     mask = Image.new("L", (width, height), 0)
     if len(polygon) >= 6:
-        xy = list(zip(polygon[::2], polygon[1::2]))
+        # Shift polygon by padding offsets
+        xy = [(x + offset_x, y + offset_y) for x, y in zip(polygon[::2], polygon[1::2])]
         ImageDraw.Draw(mask).polygon(xy, fill=255)
     return mask
 
@@ -157,89 +158,70 @@ class NailDataset(Dataset):
         return len(self.image_ids)
 
     def __getitem__(self, idx):
-        image_id  = self.image_ids[idx]
-        img_path  = self.id_to_path[image_id]
-        anns      = self.id_to_anns[image_id]
+        image_id, img_path, anns = self.image_ids[idx], self.id_to_path[self.image_ids[idx]], self.id_to_anns[self.image_ids[idx]]
 
-        # ── Load image and FORCE GRAYSCALE (Agnostic Push) ────────────────────
-        image     = Image.open(img_path).convert("RGB")
-        # 100% Agnostic: Convert to grayscale but keep 3 identical channels 
-        # so MobileNetV3-Large pretrained weights still work.
-        image     = TF.to_grayscale(image, num_output_channels=3)
+        # ── Load and Letterbox Pad ──
+        raw_img = Image.open(img_path).convert("RGB")
+        raw_img = TF.to_grayscale(raw_img, num_output_channels=3) # Agnostic
+        w, h = raw_img.size
+        max_dim = max(w, h)
         
-        orig_w, orig_h = image.size
-
-        # ── Build per-nail masks at original resolution ───────────────────────
-        masks_pil   = []
-        bboxes_orig = []
-
+        # Calculate padding to center the image
+        pad_x = (max_dim - w) // 2
+        pad_y = (max_dim - h) // 2
+        
+        # Create square canvas
+        canvas = Image.new("RGB", (max_dim, max_dim), (0, 0, 0))
+        canvas.paste(raw_img, (pad_x, pad_y))
+        
+        # ── Masks on Square Canvas ──
+        masks_resized = []
         for ann in anns:
             seg = ann.get("segmentation", [])
-            if not seg or len(seg[0]) < 6:
-                continue
-            masks_pil.append(polygon_to_mask(seg[0], orig_h, orig_w))
-            bboxes_orig.append(ann["bbox"])
+            if not seg or len(seg[0]) < 6: continue
+            # Draw mask directly on a square canvas of max_dim x max_dim
+            m_sq = polygon_to_mask(seg[0], max_dim, max_dim, offset_x=pad_x, offset_y=pad_y)
+            # Resize square mask to 448x448
+            masks_resized.append(m_sq.resize((self.image_size, self.image_size), Image.NEAREST))
+            m_sq.close()
 
-        # ── Resize to image_size ──────────────────────────────────────────────
-        sx = self.image_size / orig_w
-        sy = self.image_size / orig_h
-        image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
+        # Resize square canvas to 448x448
+        image = canvas.resize((self.image_size, self.image_size), Image.BILINEAR)
+        canvas.close(); raw_img.close()
 
-        masks_resized  = []
-        bboxes_resized = []
-        for m, (x, y, w, h) in zip(masks_pil, bboxes_orig):
-            m_resized = m.resize((self.image_size, self.image_size), Image.NEAREST)
-            masks_resized.append(m_resized)
-            bboxes_resized.append([x * sx, y * sy, w * sx, h * sy])
-            m.close()
-
-        del masks_pil
-
-        # ── Augmentation ──────────────────────────────────────────────────────
-        h_flipped, v_flipped = False, False
+        h_flip, v_flip = False, False
         if self.augment:
-            image, masks_resized, h_flipped, v_flipped = self._augment(image, masks_resized)
+            image, masks_resized, h_flip, v_flip = self._augment(image, masks_resized)
 
-        # ── Image tensor ──────────────────────────────────────────────────────
-        img_t = TF.normalize(TF.to_tensor(image), MEAN, STD)  # (3, H, W)
-
+        # ── Normalize & Tensors ──
+        img_t = TF.normalize(TF.to_tensor(image), MEAN, STD)
         S = self.image_size
-
-        # ── Binary mask (union) ───────────────────────────────────────────────
         binary_np = np.zeros((S, S), dtype=np.float32)
-        for m in masks_resized:
-            binary_np = np.maximum(binary_np, np.array(m, dtype=np.float32) / 255.0)
-        binary_t = torch.from_numpy(binary_np).clone().unsqueeze(0)   # (1, H, W)
-
-        # ── Direction field ───────────────────────────────────────────────────
         dir_np = np.zeros((2, S, S), dtype=np.float32)
-        img_orientations = self.orientations.get(str(image_id), {}) if hasattr(self, 'orientations') else {}
+        img_orient = self.orientations.get(str(image_id), {})
 
-        for m, bbox, ann in zip(masks_resized, bboxes_resized, anns):
-            mask_np = np.array(m, dtype=np.uint8)
-            ann_id_str = str(ann.get("id", ""))
+        for m, ann in zip(masks_resized, anns):
+            m_np = np.array(m, dtype=np.float32) / 255.0
+            binary_np = np.maximum(binary_np, m_np)
             
-            if ann_id_str in img_orientations:
-                # Use ground-truth orientation [dx, dy]
-                dx, dy = img_orientations[ann_id_str]
-                if h_flipped: dx = -dx
-                if v_flipped: dy = -dy
-                
-                vector_field = np.zeros((2, S, S), dtype=np.float32)
-                vector_field[0, mask_np > 0] = dx
-                vector_field[1, mask_np > 0] = dy
-                dir_np += vector_field
+            # Direction Field
+            aid_str = str(ann.get("id", ""))
+            if aid_str in img_orient:
+                dx, dy = img_orient[aid_str]
+                if h_flip: dx = -dx
+                if v_flip: dy = -dy
+                mask_fg = m_np > 0.5
+                dir_np[0, mask_fg] += dx
+                dir_np[1, mask_fg] += dy
 
-        norm  = np.sqrt(dir_np[0] ** 2 + dir_np[1] ** 2)
+        # Re-normalise
+        norm = np.sqrt(dir_np[0]**2 + dir_np[1]**2)
         valid = norm > 1e-6
         dir_np[0, valid] /= norm[valid]
         dir_np[1, valid] /= norm[valid]
-        dir_t = torch.from_numpy(dir_np).clone()
-
-        image.close()
+        
         for m in masks_resized: m.close()
-
-        return (img_t.clone().detach(), binary_t.clone().detach(), dir_t.clone().detach())
+        return (img_t.clone().detach(), torch.from_numpy(binary_np).unsqueeze(0), torch.from_numpy(dir_np))
 
     # ── Augmentation ──────────────────────────────────────────────────────────
 
