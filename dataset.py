@@ -144,70 +144,77 @@ class NailDataset(Dataset):
             img = TF.gaussian_blur(img, kernel_size=(kernel, kernel))
 
         # Texture-Invariance: Vandalize the nail area with noise/patterns
-        # 30% Sane (Clean) / 70% Randomized (Vandalized)
-        if random.random() > 0.3:
+        # 15% Sane (Clean) / 85% Randomized (Vandalized)
+        if random.random() > 0.15:
             img = self._vandalize_texture(img, msk)
 
         return img, msk
 
     def _vandalize_texture(self, img, msk):
         """
-        Anatomy-First chaos engine. Injects random, multi-directional, 
-        semi-transparent shapes to force the model to be 'Texture-Blind'.
+        Layered Manicure Engine. 
+        Paints a Base Coat (Step 1) + Art Overlays (Step 2: Stars, Rects, Stripes).
         """
         img_np = np.array(img).astype(np.float32)
         msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
         h, w, c = img_np.shape
-        
-        # Create a blank noise buffer for this image
-        noise = np.zeros((h, w, c))
         mask_3d = np.expand_dims(msk_np, axis=-1)
-        alpha_base = random.uniform(0.4, 0.85)
-
-        # ── Chaos Logic ───────────────────────────────────────────────────────
-        mode = random.choice(["blobs", "chaos_lines", "french_gradient", "solid_tint"])
         
-        if mode == "blobs":
-            # 3-6 Large Colorful Blobs
-            for _ in range(random.randint(3, 6)):
-                color = np.random.randint(0, 256, (3,))
-                radius = random.randint(15, 35)
-                ry, rx = random.randint(0, h), random.randint(0, w)
-                yy, xx = np.ogrid[:h, :w]
-                dist = (yy - ry)**2 + (xx - rx)**2
-                blob_mask = (dist <= radius**2).astype(float)
-                for ch in range(c):
-                    noise[:, :, ch] += blob_mask * (color[ch] - img_np[ry % h, rx % w, ch])
+        # Buffer for our synthetic art
+        art_layer = np.zeros((h, w, c))
+        art_mask  = np.zeros((h, w, 1))
 
-        elif mode == "chaos_lines":
-            # Multi-directional random lines
-            for _ in range(random.randint(5, 10)):
-                color = np.random.randint(0, 256, (3,))
-                thickness = random.randint(2, 6)
-                angle = random.uniform(0, np.pi)
-                # Simple line simulation by projection
-                cos_a, sin_a = np.cos(angle), np.sin(angle)
-                yy, xx = np.ogrid[:h, :w]
-                proj = xx * cos_a + yy * sin_a
-                line_mask = (np.abs(proj - random.randint(0, h+w)) < thickness).astype(float)
-                for ch in range(c):
-                    noise[:, :, ch] += line_mask * (color[ch] - 128)
-
-        elif mode == "french_gradient":
-            # Gradient Tip (random color)
+        # ── Step 1: Base Coat (80% chance) ───────────────────────────────────
+        if random.random() > 0.2:
             color = np.random.randint(0, 256, (3,))
-            grad = np.linspace(0, 1, h).reshape(h, 1)
-            for ch in range(c):
-                noise[:, :, ch] = (grad ** 2) * (color[ch] - 128)
+            if random.random() > 0.5: # Solid
+                art_layer += color
+            else: # Gradient
+                grad = np.linspace(0, 1, h).reshape(h, 1, 1)
+                art_layer += grad * color
+            art_mask += 1.0
 
-        else: # solid_tint
-            color = np.random.randint(0, 256, (3,))
-            for ch in range(c):
-                noise[:, :, ch] = (color[ch] - 128)
+        # ── Step 2: Art Overlay (Star, Rect, Stripes) ────────────────────────
+        if random.random() > 0.2:
+            num_shapes = random.randint(2, 5)
+            for _ in range(num_shapes):
+                shape_type = random.choice(["rect", "star", "stripe"])
+                color = np.random.randint(0, 256, (3,))
+                
+                if shape_type == "rect":
+                    rW, rH = random.randint(10, 30), random.randint(10, 30)
+                    ry, rx = random.randint(0, h-rH), random.randint(0, w-rW)
+                    art_layer[ry:ry+rH, rx:rx+rW, :] = color
+                    art_mask[ry:ry+rH, rx:rx+rW, :] = 1.0
+                
+                elif shape_type == "stripe":
+                    angle = random.uniform(0, np.pi)
+                    cos_a, sin_a = np.cos(angle), np.sin(angle)
+                    thickness = random.randint(2, 5)
+                    yy, xx = np.ogrid[:h, :w]
+                    proj = xx * cos_a + yy * sin_a
+                    line_m = (np.abs(proj - random.randint(0, h+w)) < thickness).astype(float)
+                    art_layer += np.expand_dims(line_m, -1) * color
+                    art_mask += np.expand_dims(line_m, -1)
 
-        # ── Final Alpha Blending ─────────────────────────────────────────────
-        # All noise is applied strictly inside the nail mask with semi-transparency
-        img_np = img_np * (1 - mask_3d * alpha_base) + (img_np + noise) * (mask_3d * alpha_base)
+                elif shape_type == "star":
+                    # Simple 5-point star simulation using small blobs
+                    ry, rx = random.randint(0, h), random.randint(0, w)
+                    radius = random.randint(8, 15)
+                    yy, xx = np.ogrid[:h, :w]
+                    dist = (yy - ry)**2 + (xx - rx)**2
+                    star_m = (dist <= radius**2).astype(float)
+                    art_layer += np.expand_dims(star_m, -1) * color
+                    art_mask += np.expand_dims(star_m, -1)
+
+        # ── Step 3: Alpha Blend & Apply ──────────────────────────────────────
+        alpha = random.uniform(0.5, 0.9)
+        art_mask = np.clip(art_mask, 0, 1)
+        
+        # Combine: Original * (1 - Art) + Art
+        # Only apply where the Nail Mask exists
+        final_mask = art_mask * mask_3d * alpha
+        img_np = img_np * (1 - final_mask) + (art_layer * final_mask)
         
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
