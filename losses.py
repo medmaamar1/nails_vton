@@ -122,15 +122,21 @@ class NailVTONLoss(nn.Module):
 
         return {"binary_mask": bin_t, "direction_field": dir_t}
 
-    def forward(self, multi_predictions, targets):
+    def forward(self, flattened_preds, targets):
         """
-        multi_predictions: list of tuples (binary, direction)
+        flattened_preds: tuple of 6 tensors (bin0, dir0, bin1, dir1, bin2, dir2)
         """
         total_loss = 0.0
         details = {}
 
-        for i, preds in enumerate(multi_predictions):
-            p_bin, p_dir = preds
+        # Unpack flat tuple into pairs
+        pairs = [
+            (flattened_preds[0], flattened_preds[1]),
+            (flattened_preds[2], flattened_preds[3]),
+            (flattened_preds[4], flattened_preds[5])
+        ]
+
+        for i, (p_bin, p_dir) in enumerate(pairs):
             h, w = p_bin.shape[-2:]
             
             # Phase 6: targets is a 3-tuple (img_t, bin_t, dir_t)
@@ -154,7 +160,7 @@ class NailVTONLoss(nn.Module):
             # Local unroll
             del l_lvl, l_bin, l_dir, target_lvl, valid_mask
 
-        details["l2_dir"]     = float(sum(v for k,v in details.items() if "l_dir_" in k) / len(multi_predictions))
+        details["l2_dir"]     = float(sum(v for k,v in details.items() if "l_dir_" in k) / 3)
         details["loss_total"] = float(total_loss.detach().cpu())
         return total_loss, details
 

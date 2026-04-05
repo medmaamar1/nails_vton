@@ -159,28 +159,21 @@ class NailVTONModel(nn.Module):
         def _norm_dir(d):
             return d / d.norm(dim=1, keepdim=True).clamp(min=1e-6)
 
-        p0 = (out0_bin, _norm_dir(out0_dir))
-        p1 = (out1_bin, _norm_dir(out1_dir))
-        
-        final_bin = F.interpolate(out2_bin, size=(self.image_size, self.image_size),
-                                  mode="bilinear", align_corners=False)
-        final_dir = F.interpolate(out2_dir, size=(self.image_size, self.image_size),
-                                  mode="bilinear", align_corners=False)
-        pf = (final_bin, _norm_dir(final_dir))
-
-        return [p0, p1, pf]
+        return (
+            out0_bin, _norm_dir(out0_dir),
+            out1_bin, _norm_dir(out1_dir),
+            final_bin, _norm_dir(final_dir)
+        )
 
     @torch.no_grad()
     def predict(self, x, binary_thresh=0.5):
         self.eval()
         multi_preds = self(x)
-        final_bin, final_dir = multi_preds[-1]
+        # multi_preds: (bin0, dir0, bin1, dir1, bin_f, dir_f)
+        final_bin, final_dir = multi_preds[4], multi_preds[5]
         # Binary output is now (B, 2, H, W). Use softmax and take foreground channel (index 1).
         prob_fg = torch.softmax(final_bin, dim=1)[:, 1:2]
-        return (
-            prob_fg > binary_thresh,
-            final_dir,
-        )
+        return prob_fg > binary_thresh, final_dir
 
     def count_parameters(self):
         total     = sum(p.numel() for p in self.parameters())
