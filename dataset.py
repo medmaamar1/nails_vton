@@ -144,14 +144,15 @@ class NailDataset(Dataset):
             img = TF.gaussian_blur(img, kernel_size=(kernel, kernel))
 
         # Texture-Invariance: Vandalize the nail area with noise/patterns
-        if random.random() > 0.5:
+        # 30% Sane (Clean) / 70% Randomized (Vandalized)
+        if random.random() > 0.3:
             img = self._vandalize_texture(img, msk)
 
         return img, msk
 
     def _vandalize_texture(self, img, msk):
         """
-        Injects random noise/patterns strictly inside the nail mask.
+        Injects random noise/patterns/solid colors strictly inside the nail mask.
         Forces the model to be 'Texture-Blind' and focus on the cuticle edge.
         """
         img_np = np.array(img).astype(np.float32)
@@ -159,9 +160,15 @@ class NailDataset(Dataset):
         
         # Create a noise pattern (Simulating real manicures: Red/Blue/Dots/French)
         h, w, c = img_np.shape
-        noise_type = random.choice(["gauss", "stripes", "dots", "french", "gradient"])
+        noise_type = random.choice(["gauss", "stripes", "dots", "french", "gradient", "solid"])
         noise = np.zeros((h, w, c))
         
+        if noise_type == "solid":
+            # Paint the nail a pure solid random color (Red, Black, Blue, etc.)
+            color = np.random.randint(0, 256, (3,))
+            img_np[msk_np > 0.5] = color
+            return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
+
         if noise_type == "gauss":
             noise = np.random.normal(0, 70, (h, w, c))
         elif noise_type == "stripes":
