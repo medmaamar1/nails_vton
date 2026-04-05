@@ -82,17 +82,17 @@ class SobelEdgeLoss(nn.Module):
 
 class BinarySegLoss(nn.Module):
     """
-    40% NLL-LMP  — hard pixel mining (knuckle / palm FPs)
-    40% Soft Dice — connectivity and hole prevention
-    20% Sobel Edge — cuticle boundary sharpness
+    20% NLL-LMP  — focus ONLY on the worst 5% (Ghost-Busting hallucinations)
+    40% Soft Dice — overall mask connectivity
+    40% Sobel Edge — sharp cuticle boundary lock-on
     """
-    def __init__(self, keep_ratio=0.15, alpha=0.4, beta=0.2):
+    def __init__(self, keep_ratio=0.05, alpha=0.4, beta=0.4):
         super().__init__()
         self.lmp   = LMPLoss(keep_ratio=keep_ratio)
         self.dice  = SoftDiceLoss()
         self.edge  = SobelEdgeLoss()
-        self.alpha = alpha  # Dice weight
-        self.beta  = beta   # Edge weight
+        self.alpha = alpha  # Dice weight = 0.4
+        self.beta  = beta   # Edge weight = 0.4
 
     def forward(self, logits, targets):
         # logits : (B, 2, H, W)
@@ -100,8 +100,18 @@ class BinarySegLoss(nn.Module):
         l_nll  = self.lmp(logits, targets)
         l_dice = self.dice(logits, targets)
         l_edge = self.edge(logits, targets)
-        gamma  = 1.0 - self.alpha - self.beta  # NLL weight = 0.4
-        return gamma * l_nll + self.alpha * l_dice + self.beta * l_edge
+        
+        gamma  = 1.0 - self.alpha - self.beta  # NLL weight = 0.2
+        loss   = gamma * l_nll + self.alpha * l_dice + self.beta * l_edge
+        
+        # Background-Only Penalty: If the image has zero nail pixels, punish FPs double
+        # This helps eliminate 'Ghost Nails' on knuckles/palms.
+        with torch.no_grad():
+            is_empty_batch = targets.sum() == 0
+        if is_empty_batch:
+            loss = loss * 2.0
+            
+        return loss
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────

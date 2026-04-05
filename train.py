@@ -33,13 +33,13 @@ def parse_args():
     p.add_argument("--data_root",          default=DATA_ROOT)
     p.add_argument("--epochs",             type=int,   default=100)
     p.add_argument("--batch_size",         type=int,   default=16)
-    p.add_argument("--lr",                 type=float, default=1e-3)
+    p.add_argument("--lr",                 type=float, default=5e-4) # Fine-Tuning LR
     p.add_argument("--image_size",         type=int,   default=448)
     p.add_argument("--num_workers",        type=int,   default=2)
     p.add_argument("--ckpt_dir",           default="checkpoints")
     p.add_argument("--resume",             default=None)
     p.add_argument("--no_amp",             action="store_true")
-    p.add_argument("--warmup_epochs",      type=int,   default=5)
+    p.add_argument("--warmup_epochs",      type=int,   default=10) # Longer warmup for stability
     p.add_argument("--limit_train_batches",type=int,   default=None)
     p.add_argument("--limit_val_batches",  type=int,   default=None)
     return p.parse_args()

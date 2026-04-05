@@ -138,6 +138,11 @@ class NailDataset(Dataset):
         img = TF.adjust_brightness(img, 1 + random.uniform(-0.35, 0.35))
         img = TF.adjust_contrast(img,   1 + random.uniform(-0.35, 0.35))
 
+        # Anatomy-First: Random Blur to smear manicures and ignore art
+        if random.random() > 0.4:
+            kernel = random.choice([3, 5])
+            img = TF.gaussian_blur(img, kernel_size=(kernel, kernel))
+
         return img, msk
 
 
