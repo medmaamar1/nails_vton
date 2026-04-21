@@ -234,37 +234,47 @@ class NailDataset(Dataset):
 
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
+    def _pick_alpha(self):
+        """30% chance fully opaque, otherwise semi-transparent."""
+        if random.random() < 0.30:
+            return 1.0
+        return random.uniform(0.30, 0.70)
+
     def _vandalize_background(self, img, msk):
-        """Paint random shapes and lines onto non-nail background to prevent texture shortcuts."""
+        """Paint random shapes, lines, and noise onto the background."""
         img_np  = np.array(img).astype(np.float32)
         msk_np  = np.array(msk).astype(np.float32) / 255.0
         h, w, _ = img_np.shape
-        bg_mask = np.expand_dims(1.0 - msk_np, axis=-1)  # non-nail area
+        bg_mask = np.expand_dims(1.0 - msk_np, axis=-1)
 
-        num_patches = random.randint(5, 12)
+        # Dense Gaussian noise over the entire background
+        noise_strength = random.uniform(15, 45)
+        noise = np.random.normal(0, noise_strength, img_np.shape)
+        img_np = img_np + noise * (1.0 - np.expand_dims(msk_np, -1))
+
+        num_patches = random.randint(8, 18)
         for _ in range(num_patches):
             color  = np.random.randint(0, 256, (3,))
-            a      = random.uniform(0.25, 0.55)
-            dtype  = random.choice(["rect", "circle", "line", "cross"])
+            a      = self._pick_alpha()
+            dtype  = random.choice(["rect", "circle", "line", "cross", "filled_rect"])
             s_mask = np.zeros((h, w, 1))
 
-            if dtype == "rect":
-                rw, rh = random.randint(15, 70), random.randint(15, 70)
+            if dtype in ("rect", "filled_rect"):
+                rw, rh = random.randint(20, 100), random.randint(20, 100)
                 ry     = random.randint(0, max(1, h - rh))
                 rx     = random.randint(0, max(1, w - rw))
                 s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
 
             elif dtype == "circle":
-                radius = random.randint(10, 40)
+                radius = random.randint(15, 60)
                 ry, rx = random.randint(0, h), random.randint(0, w)
                 yy, xx = np.ogrid[:h, :w]
                 s_mask = ((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float)
                 s_mask = np.expand_dims(s_mask, -1)
 
             elif dtype == "line":
-                # Thick diagonal/straight line across the background
                 angle  = random.uniform(0, np.pi)
-                thick  = random.randint(3, 10)
+                thick  = random.randint(4, 16)
                 cos_a, sin_a = np.cos(angle), np.sin(angle)
                 yy, xx = np.ogrid[:h, :w]
                 proj   = xx * cos_a + yy * sin_a
@@ -273,10 +283,9 @@ class NailDataset(Dataset):
                 s_mask = np.expand_dims(s_mask, -1)
 
             elif dtype == "cross":
-                # Plus-sign shape at a random location
                 cy, cx = random.randint(0, h), random.randint(0, w)
-                arm    = random.randint(10, 35)
-                thick  = random.randint(3, 8)
+                arm    = random.randint(15, 50)
+                thick  = random.randint(4, 12)
                 s_mask[max(0,cy-thick):min(h,cy+thick), max(0,cx-arm):min(w,cx+arm), :] = 1.0
                 s_mask[max(0,cy-arm):min(h,cy+arm), max(0,cx-thick):min(w,cx+thick), :] = 1.0
 
@@ -286,29 +295,32 @@ class NailDataset(Dataset):
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
     def _vandalize_hand(self, img, msk):
-        """Overlay semi-transparent shapes on the hand/skin region (non-nail foreground).
-        Teaches the model that skin texture is irrelevant — only shape matters."""
+        """Overlay shapes and noise on the hand/skin region to destroy texture cues."""
         img_np  = np.array(img).astype(np.float32)
         msk_np  = np.array(msk).astype(np.float32) / 255.0
         h, w, _ = img_np.shape
-        # Target: the whole image minus nail area — approximates hand/skin
         hand_mask = np.expand_dims(1.0 - msk_np, axis=-1)
 
-        num_patches = random.randint(4, 9)
+        # Gaussian noise scoped to the hand area
+        noise_strength = random.uniform(10, 35)
+        noise = np.random.normal(0, noise_strength, img_np.shape)
+        img_np = img_np + noise * hand_mask
+
+        num_patches = random.randint(6, 14)
         for _ in range(num_patches):
             color  = np.random.randint(0, 256, (3,))
-            a      = random.uniform(0.2, 0.45)  # kept moderate — don't erase the hand
-            dtype  = random.choice(["rect", "circle", "line", "stripe_thin"])
+            a      = self._pick_alpha()
+            dtype  = random.choice(["rect", "circle", "line", "stripe_thin", "filled_rect"])
             s_mask = np.zeros((h, w, 1))
 
-            if dtype == "rect":
-                rw, rh = random.randint(10, 45), random.randint(10, 45)
+            if dtype in ("rect", "filled_rect"):
+                rw, rh = random.randint(15, 60), random.randint(15, 60)
                 ry     = random.randint(0, max(1, h - rh))
                 rx     = random.randint(0, max(1, w - rw))
                 s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
 
             elif dtype == "circle":
-                radius = random.randint(6, 25)
+                radius = random.randint(8, 35)
                 ry, rx = random.randint(0, h), random.randint(0, w)
                 yy, xx = np.ogrid[:h, :w]
                 s_mask = ((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float)
@@ -316,7 +328,7 @@ class NailDataset(Dataset):
 
             elif dtype == "line":
                 angle  = random.uniform(0, np.pi)
-                thick  = random.randint(2, 6)
+                thick  = random.randint(3, 10)
                 cos_a, sin_a = np.cos(angle), np.sin(angle)
                 yy, xx = np.ogrid[:h, :w]
                 proj   = xx * cos_a + yy * sin_a
@@ -325,10 +337,9 @@ class NailDataset(Dataset):
                 s_mask = np.expand_dims(s_mask, -1)
 
             elif dtype == "stripe_thin":
-                # A pair of thin parallel lines
                 angle  = random.uniform(0, np.pi)
-                thick  = random.randint(1, 3)
-                gap    = random.randint(8, 20)
+                thick  = random.randint(1, 4)
+                gap    = random.randint(8, 25)
                 cos_a, sin_a = np.cos(angle), np.sin(angle)
                 yy, xx = np.ogrid[:h, :w]
                 proj   = xx * cos_a + yy * sin_a
@@ -347,9 +358,49 @@ class NailDataset(Dataset):
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
 
+def _print_augmentation_stats(train_ds, val_ds):
+    n_train = len(train_ds)
+    n_val   = len(val_ds)
+    n_total = n_train + n_val
+
+    def count(p):
+        return round(n_train * p)
+
+    p_hflip   = 0.50
+    p_vflip   = 0.50
+    p_rotate  = 0.60
+    p_crop    = 0.50
+    p_bg      = 0.50
+    p_hand    = 0.50
+    p_texture = 0.50
+    p_noise   = 0.25
+
+    p_none = (1-p_hflip)*(1-p_vflip)*(1-p_rotate)*(1-p_crop)*(1-p_bg)*(1-p_hand)*(1-p_texture)*(1-p_noise)
+    p_any  = 1.0 - p_none
+
+    print(f"\n{'─'*60}")
+    print(f"  Dataset            train={n_train}  val={n_val}  total={n_total}")
+    print(f"  Val set            never augmented")
+    print(f"")
+    print(f"  Expected per epoch (train only):")
+    print(f"    any augmentation       ~{count(p_any):>5} / {n_train}  ({p_any*100:.1f}%)")
+    print(f"    horizontal flip        ~{count(p_hflip):>5} / {n_train}  ({p_hflip*100:.0f}%)")
+    print(f"    vertical flip          ~{count(p_vflip):>5} / {n_train}  ({p_vflip*100:.0f}%)")
+    print(f"    rotation ±20°          ~{count(p_rotate):>5} / {n_train}  ({p_rotate*100:.0f}%)")
+    print(f"    random crop/zoom       ~{count(p_crop):>5} / {n_train}  ({p_crop*100:.0f}%)")
+    print(f"    background vandalize   ~{count(p_bg):>5} / {n_train}  ({p_bg*100:.0f}%,  8–18 shapes + noise)")
+    print(f"    hand vandalize         ~{count(p_hand):>5} / {n_train}  ({p_hand*100:.0f}%,  6–14 shapes + noise)")
+    print(f"    nail texture/manicure  ~{count(p_texture):>5} / {n_train}  ({p_texture*100:.0f}%)")
+    print(f"    global noise           ~{count(p_noise):>5} / {n_train}  ({p_noise*100:.0f}%)")
+    print(f"    opaque shapes (α=1.0)  ~30% of every shape drawn")
+    print(f"{'─'*60}\n")
+
+
 def make_loaders(base_path, batch_size=16, num_workers=2, image_size=IMAGE_SIZE):
     train_ds = NailDataset(base_path, split="train", augment=True,  image_size=image_size)
     val_ds   = NailDataset(base_path, split="val",   augment=False, image_size=image_size)
+
+    _print_augmentation_stats(train_ds, val_ds)
 
     train_loader = DataLoader(
         train_ds,
