@@ -4,14 +4,39 @@ Nail VTON Loss Functions
 Single-task binary segmentation only. Direction loss removed.
 
 Active losses:
-  TverskyLoss    — Heavily penalizes False Positives (Ghost-Buster)
+  LMPLoss        — Loss Max-Pooling: mean over top-10% hardest pixels (paper §3.3, +2% mIoU)
+  TverskyLoss    — Very heavily penalizes False Positives (alpha=0.15, beta=0.85)
   SoftDiceLoss   — Penalises holes and patchy masks
   SobelEdgeLoss  — Forces sharp, precise cuticle boundaries
-  BinarySegLoss  — Combined: 20% Tversky + 40% Dice + 40% Edge
+  PresenceGate   — BCE on global nail-presence gate
+  BinarySegLoss  — Main: 30% LMP + 15% Tversky + 25% Dice + 30% Edge
+                   + 40% weight * LMP on intermediate (Laplacian pyramid, paper §3.2)
+                   + 30% Gate BCE
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+# ── Loss Max-Pooling (paper §3.3) ─────────────────────────────────────────────
+
+class LMPLoss(nn.Module):
+    """Loss Max-Pooling: sort all pixels in the minibatch by cross-entropy loss,
+    take the mean of the top-p fraction (default p=0.1 = hardest 10%).
+    Paper reports +2% mIoU vs class-weighted baseline for nail segmentation."""
+    def __init__(self, p=0.1):
+        super().__init__()
+        self.p = p
+
+    def forward(self, logits, targets):
+        # Per-pixel cross-entropy, no reduction
+        target_long = targets.squeeze(1).long()                       # (B, H, W)
+        loss_map    = F.cross_entropy(logits, target_long, reduction="none")  # (B, H, W)
+
+        loss_flat = loss_map.view(-1)
+        n_keep    = max(1, int(self.p * loss_flat.numel()))
+        top_loss, _ = torch.topk(loss_flat, n_keep)
+        return top_loss.mean()
 
 
 # ── Tversky Loss (The Ghost-Buster) ─────────────────────────────────────────────
@@ -19,9 +44,9 @@ import torch.nn.functional as F
 class TverskyLoss(nn.Module):
     """
     A generalization of Dice loss.
-    alpha=0.3, beta=0.7 -> Heavily penalizes False Positives (Ghost Nails).
+    alpha=0.15, beta=0.85 -> Very heavily penalizes False Positives (Ghost Nails).
     """
-    def __init__(self, alpha=0.3, beta=0.7, eps=1e-6):
+    def __init__(self, alpha=0.15, beta=0.85, eps=1e-6):
         super().__init__()
         self.alpha = alpha
         self.beta  = beta
@@ -87,34 +112,59 @@ class SobelEdgeLoss(nn.Module):
 
 class BinarySegLoss(nn.Module):
     """
-    20% Tversky Loss — focus ONLY on False Positives (Ghost-Busting)
-    40% Soft Dice — overall mask connectivity
-    40% Sobel Edge — sharp cuticle boundary lock-on
-    """
-    def __init__(self, alpha=0.3, beta=0.7, edge_weight=0.4, dice_weight=0.4):
-        super().__init__()
-        self.tversky = TverskyLoss(alpha=alpha, beta=beta)
-        self.dice    = SoftDiceLoss()
-        self.edge    = SobelEdgeLoss()
-        self.alpha_w = dice_weight
-        self.beta_w  = edge_weight
+    Main output (full-res):
+      30% LMP     — hardest-pixel cross-entropy (paper §3.3)
+      15% Tversky — FP suppression
+      25% Dice    — mask connectivity
+      30% Edge    — sharp cuticle boundaries
 
-    def forward(self, logits, targets):
-        # logits : (B, 2, H, W)
-        # targets: (B, 1, H, W) float32
+    Intermediate output (Laplacian pyramid, paper §3.2):
+      40% weight × LMP at f0 resolution — forces low-res features to be meaningful
+
+    Gate: 30% weight × BCE on presence prediction
+    """
+    def __init__(self, alpha=0.15, beta=0.85, inter_weight=0.4, gate_weight=0.3):
+        super().__init__()
+        self.lmp         = LMPLoss(p=0.1)
+        self.tversky     = TverskyLoss(alpha=alpha, beta=beta)
+        self.dice        = SoftDiceLoss()
+        self.edge        = SobelEdgeLoss()
+        self.inter_weight = inter_weight
+        self.gate_weight  = gate_weight
+
+    def forward(self, output, targets):
+        # output  : (logits, logits_inter, gate)
+        #   logits       : (B, 2, H, W)       — full-resolution output
+        #   logits_inter : (B, 2, H/16, W/16) — intermediate Laplacian level
+        #   gate         : (B, 1)             — presence probability
+        # targets : (B, 1, H, W) float32
+        logits, logits_inter, gate = output
+
+        # ── Main segmentation loss ────────────────────────────────────────────
+        l_lmp     = self.lmp(logits, targets)
         l_tversky = self.tversky(logits, targets)
         l_dice    = self.dice(logits, targets)
         l_edge    = self.edge(logits, targets)
-        
-        gamma_w   = 1.0 - self.alpha_w - self.beta_w  # Tversky weight = 0.2
-        loss      = gamma_w * l_tversky + self.alpha_w * l_dice + self.beta_w * l_edge
-        
-        # Background-Only Penalty: If the image has zero nail pixels, punish FPs double
+        loss      = 0.30 * l_lmp + 0.15 * l_tversky + 0.25 * l_dice + 0.30 * l_edge
+
+        # ── Intermediate (Laplacian pyramid) supervision ──────────────────────
+        # Downsample GT to match f0 spatial size, apply LMP at that scale
+        inter_h, inter_w = logits_inter.shape[2:]
+        targets_ds = F.interpolate(targets, size=(inter_h, inter_w), mode="nearest")
+        l_inter    = self.lmp(logits_inter, targets_ds)
+        loss       = loss + self.inter_weight * l_inter
+
+        # ── Gate BCE ──────────────────────────────────────────────────────────
+        has_nail = (targets.sum(dim=(-1, -2, -3)) > 0).float()  # (B,)
+        l_gate   = F.binary_cross_entropy(gate.squeeze(1), has_nail)
+        loss     = loss + self.gate_weight * l_gate
+
+        # ── Background-Only Penalty ───────────────────────────────────────────
         with torch.no_grad():
             is_empty_batch = targets.sum() == 0
         if is_empty_batch:
-            loss = loss * 2.0
-            
+            loss = loss * 4.0
+
         return loss
 
 

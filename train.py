@@ -83,8 +83,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         optimizer.zero_grad(set_to_none=True)
 
         with autocast("cuda", enabled=use_amp):
-            logits = model(image)                    # (B, 2, H, W)
-            loss   = criterion(logits, target)
+            logits, logits_inter, gate = model(image)   # (B,2,H,W), (B,2,h,w), (B,1)
+            loss = criterion((logits, logits_inter, gate), target)
 
         if use_amp:
             scaler.scale(loss).backward()
@@ -111,10 +111,11 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             gc.collect(2)
 
         # Surgical nullification
-        image  = None
-        target = None
-        logits = None
-        loss   = None
+        image        = None
+        target       = None
+        logits       = None
+        logits_inter = None
+        loss         = None
 
         if limit is not None and i + 1 >= limit:
             break
@@ -143,17 +144,18 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
         batch  = None
 
         with autocast("cuda", enabled=use_amp):
-            logits = model(image)
-            loss   = criterion(logits, target)
+            logits, logits_inter, gate = model(image)
+            loss = criterion((logits, logits_inter, gate), target)
 
         total_loss += loss.item()
         total_miou += compute_miou(logits, target)
 
         # Cleanup
-        image  = None
-        target = None
-        logits = None
-        loss   = None
+        image        = None
+        target       = None
+        logits       = None
+        logits_inter = None
+        loss         = None
 
     if n_batches == 0:
         return 0.0, 0.0

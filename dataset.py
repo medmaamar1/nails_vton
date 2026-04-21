@@ -13,7 +13,6 @@ Returns per-sample tuple:
 """
 
 import gc
-import os
 import random
 import numpy as np
 import pandas as pd
@@ -120,11 +119,6 @@ class NailDataset(Dataset):
             img = TF.hflip(img)
             msk = TF.hflip(msk)
 
-        # Vertical flip
-        if random.random() > 0.5:
-            img = TF.vflip(img)
-            msk = TF.vflip(msk)
-
         # Random crop & zoom (simulates close-ups)
         if random.random() > 0.5:
             scale     = random.uniform(0.65, 1.0)
@@ -148,6 +142,16 @@ class NailDataset(Dataset):
         if random.random() > 0.5:
             img = self._vandalize_texture(img, msk)
 
+        # Background vandalization: force model to ignore noisy non-nail regions
+        if random.random() > 0.6:
+            img = self._vandalize_background(img, msk)
+
+        # Global Gaussian noise: simulate camera noise and low-quality images
+        if random.random() > 0.75:
+            img_np = np.array(img).astype(np.float32)
+            noise  = np.random.normal(0, random.uniform(5, 20), img_np.shape)
+            img    = Image.fromarray(np.clip(img_np + noise, 0, 255).astype(np.uint8))
+
         return img, msk
 
     def _vandalize_texture(self, img, msk):
@@ -158,7 +162,7 @@ class NailDataset(Dataset):
         """
         img_np = np.array(img).astype(np.float32)
         msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
-        h, w, c = img_np.shape
+        h, w, _ = img_np.shape
         mask_3d = np.expand_dims(msk_np, axis=-1)
         
         # ── Step 1: Base Coat (80% chance) ───────────────────────────────────
@@ -212,9 +216,39 @@ class NailDataset(Dataset):
                 # Bake ON TOP
                 final_piece_mask = s_mask * mask_3d * a
                 img_np = img_np * (1 - final_piece_mask) + (color * final_piece_mask)
-        
+
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
-        
+
+    def _vandalize_background(self, img, msk):
+        """Paint random color patches onto non-nail background regions.
+        Prevents the model from using texture shortcuts (smooth skin = background)."""
+        img_np  = np.array(img).astype(np.float32)
+        msk_np  = np.array(msk).astype(np.float32) / 255.0
+        h, w, _ = img_np.shape
+        bg_mask = np.expand_dims(1.0 - msk_np, axis=-1)  # non-nail area
+
+        num_patches = random.randint(3, 8)
+        for _ in range(num_patches):
+            color = np.random.randint(0, 256, (3,))
+            a     = random.uniform(0.2, 0.55)
+            dtype = random.choice(["rect", "circle"])
+            s_mask = np.zeros((h, w, 1))
+
+            if dtype == "rect":
+                rw, rh = random.randint(10, 50), random.randint(10, 50)
+                ry     = random.randint(0, max(1, h - rh))
+                rx     = random.randint(0, max(1, w - rw))
+                s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
+            else:  # circle
+                radius = random.randint(8, 30)
+                ry, rx = random.randint(0, h), random.randint(0, w)
+                yy, xx = np.ogrid[:h, :w]
+                s_mask = ((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float)
+                s_mask = np.expand_dims(s_mask, -1)
+
+            piece = s_mask * bg_mask * a
+            img_np = img_np * (1 - piece) + (color * piece)
+
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
 

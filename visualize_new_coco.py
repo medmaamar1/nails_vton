@@ -1,107 +1,133 @@
-import os
+"""
+visualize_new_coco.py
+----------------------
+Visualize the augmentation pipeline from the current NailDataset.
+
+For each sampled image shows a 1-row grid:
+  Col 0 : Original (no augmentation) + mask overlay (green)
+  Col 1 : Augmented variant #1
+  Col 2 : Augmented variant #2
+  Col 3 : Augmented variant #3
+
+The three augmented variants are independently sampled from the same index,
+so you can see the full range of what each image can look like during training
+(nail vandalization, background patches, gaussian noise, blur, crop/zoom, hflip).
+
+Usage:
+    python visualize_new_coco.py
+    python visualize_new_coco.py --data_root /path/to/data --n_samples 8
+    python visualize_new_coco.py --split val --n_samples 4
+"""
+
+import argparse
+import random
 import sys
-import json
+import os
+import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dataset import assign_finger_ids, FINGER_UNUSED, FINGER_THUMB, FINGER_INDEX, FINGER_MIDDLE, FINGER_RING, FINGER_PINKY
-from test_finger_mapping import visualize_mapping, LBL, COLOR_MAP
+from dataset import NailDataset, DATA_ROOT, MEAN, STD
 
-def visualize_new_dataset_mapping(coco_dir, num_samples=5):
-    json_path = os.path.join(coco_dir, "_annotations.coco.json")
-    with open(json_path, 'r') as f:
-        coco = json.load(f)
 
-    # Group annotations by image_id
-    id_to_file = {}
-    for img in coco['images']:
-        id_to_file[img['id']] = img['file_name']
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
-    id_to_anns = {}
-    for ann in coco['annotations']:
-        img_id = ann['image_id']
-        id_to_anns.setdefault(img_id, []).append(ann)
+def denormalize(tensor):
+    """Normalized (3,H,W) tensor → uint8 numpy (H,W,3)."""
+    mean = np.array(MEAN).reshape(3, 1, 1)
+    std  = np.array(STD).reshape(3, 1, 1)
+    img  = tensor.numpy() * std + mean
+    return np.clip(img * 255, 0, 255).astype(np.uint8).transpose(1, 2, 0)
 
-    # Take first num_samples images
-    image_ids = list(id_to_anns.keys())[:num_samples]
 
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_plots")
-    os.makedirs(out_dir, exist_ok=True)
-    
-    for img_id in image_ids:
-        anns = id_to_anns[img_id]
-        bboxes = [ann['bbox'] for ann in anns]
-        segmentations = [ann.get('segmentation', []) for ann in anns]
-        labels = assign_finger_ids(bboxes)
-        
-        filename = id_to_file[img_id]
-        print(f"Assigning labels for image: {filename}")
-        
-        # Load the actual image for visualization if available
-        visualize_mapping_with_image(
-            os.path.join(coco_dir, filename),
-            bboxes,
-            segmentations,
-            labels,
-            f"Image ID: {img_id}",
-            f"mapped_{filename}"
+def overlay_mask(img_np, mask_np, color=(50, 220, 80), alpha=0.45):
+    """Blend a green mask overlay onto the image."""
+    out = img_np.astype(np.float32).copy()
+    nail_px = mask_np > 0.5
+    for c, col in enumerate(color):
+        out[:, :, c] = np.where(nail_px,
+                                out[:, :, c] * (1 - alpha) + col * alpha,
+                                out[:, :, c])
+    return out.astype(np.uint8)
+
+
+def nail_coverage(mask_np):
+    """Return % of pixels that are nail."""
+    return mask_np.mean() * 100
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+def visualize_augmentation(data_root, split="train", n_samples=6, out_dir="debug_augmentation"):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ds_clean = NailDataset(data_root, split=split, augment=False)
+    ds_aug   = NailDataset(data_root, split=split, augment=True)
+
+    if len(ds_clean) == 0:
+        print(f"[ERROR] No samples found in split='{split}'. Check your data_root.")
+        return
+
+    n_samples = min(n_samples, len(ds_clean))
+    indices   = random.sample(range(len(ds_clean)), n_samples)
+
+    N_AUG = 3
+    COLS  = 1 + N_AUG  # original + 3 augmented variants
+
+    print(f"Visualizing {n_samples} samples from split='{split}'...")
+
+    for sample_i, idx in enumerate(indices):
+        fig, axes = plt.subplots(1, COLS, figsize=(5 * COLS, 5.5))
+        fig.suptitle(
+            f"Sample idx={idx}  |  Green = nail mask  |  "
+            f"Augmentations: hflip · crop/zoom · brightness · blur · "
+            f"nail vandalize (50%) · bg vandalize (40%) · noise (25%)",
+            fontsize=8, color="#444"
         )
 
-def visualize_mapping_with_image(img_path, bboxes, segmentations, labels, title, filename):
-    fig, ax = plt.subplots(figsize=(8, 8))
-    
-    try:
-        img = plt.imread(img_path)
-        ax.imshow(img)
-    except Exception as e:
-        print(f"Could not load image {img_path}: {e}")
-        ax.set_facecolor("#f5d5c5")
-        
-        all_x = [b[0] for b in bboxes] + [b[0] + b[2] for b in bboxes]
-        all_y = [b[1] for b in bboxes] + [b[1] + b[3] for b in bboxes]
-        if all_x and all_y:
-            padx, pady = 50, 50
-            ax.set_xlim(min(all_x) - padx, max(all_x) + padx)
-            ax.set_ylim(max(all_y) + pady, min(all_y) - pady)
+        # ── Col 0: original ──────────────────────────────────────────────────
+        img_t, msk_t = ds_clean[idx]
+        img_np  = denormalize(img_t)
+        msk_np  = msk_t.squeeze(0).numpy()
+        cov     = nail_coverage(msk_np)
 
-    for i, (bbox, seg, label) in enumerate(zip(bboxes, segmentations, labels)):
-        x, y, w, h = bbox
-        color = COLOR_MAP.get(label, "black")
-        name = LBL.get(label, f"UNK({label})")
-        
-        # Draw the precise curved polygon mask
-        if seg and len(seg) > 0 and len(seg[0]) >= 6:
-            poly = seg[0]
-            xs = poly[0::2]
-            ys = poly[1::2]
-            polygon = patches.Polygon(list(zip(xs, ys)), linewidth=2, edgecolor=color, facecolor=color, alpha=0.4)
-            ax.add_patch(polygon)
-        else:
-            # Fallback to bbox if no segmentation exists
-            rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor=color, facecolor=color, alpha=0.4)
-            ax.add_patch(rect)
-        
-        # Draw bounding box outline for reference
-        rect_outline = patches.Rectangle((x, y), w, h, linewidth=1, linestyle='--', edgecolor=color, facecolor='none')
-        ax.add_patch(rect_outline)
-        
-        plt.text(x, y-5, f"{i}: {name}", color="white", weight="bold", 
-                 bbox=dict(facecolor=color, alpha=0.9, edgecolor="none", pad=2))
-        
-        cx = x + w/2
-        cy = y + h/2
-        plt.plot(cx, cy, 'o', color=color, markersize=5)
+        axes[0].imshow(overlay_mask(img_np, msk_np))
+        axes[0].set_title(f"Original\ncoverage={cov:.1f}%", fontsize=9, weight="bold")
+        axes[0].axis("off")
 
-    plt.title(title)
-    plt.tight_layout()
-    
-    save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_plots", filename)
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  -> Visual confirmation saved to: {save_path}")
+        # ── Col 1-3: augmented variants ──────────────────────────────────────
+        aug_labels = ["Augmented #1", "Augmented #2", "Augmented #3"]
+        for v in range(N_AUG):
+            img_a, msk_a = ds_aug[idx]
+            img_np_a = denormalize(img_a)
+            msk_np_a = msk_a.squeeze(0).numpy()
+            cov_a    = nail_coverage(msk_np_a)
+
+            axes[v + 1].imshow(overlay_mask(img_np_a, msk_np_a))
+            axes[v + 1].set_title(f"{aug_labels[v]}\ncoverage={cov_a:.1f}%", fontsize=9)
+            axes[v + 1].axis("off")
+
+        plt.tight_layout()
+        save_path = out_dir / f"aug_{sample_i:03d}_idx{idx}.png"
+        plt.savefig(save_path, dpi=130, bbox_inches="tight")
+        plt.close()
+        print(f"  [{sample_i+1}/{n_samples}] Saved → {save_path.name}")
+
+    print(f"\nDone. All outputs in: {out_dir.resolve()}/")
+
 
 if __name__ == "__main__":
-    test_dir = "/kaggle/input/datasets/almohamed132/nails-vton/train"
-    print("Testing mapping on new dataset...")
-    visualize_new_dataset_mapping(test_dir, num_samples=10)
+    parser = argparse.ArgumentParser("Nail VTON — Augmentation Visualizer")
+    parser.add_argument("--data_root", default=DATA_ROOT,
+                        help="Root of the NailSegmentationDatasetV2 folder")
+    parser.add_argument("--split",     default="train",
+                        help="Dataset split to sample from (train / val)")
+    parser.add_argument("--n_samples", type=int, default=6,
+                        help="Number of images to visualize")
+    parser.add_argument("--out_dir",   default="debug_augmentation",
+                        help="Folder to save output PNG files")
+    args = parser.parse_args()
+
+    visualize_augmentation(args.data_root, args.split, args.n_samples, args.out_dir)
