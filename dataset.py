@@ -235,10 +235,8 @@ class NailDataset(Dataset):
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
     def _pick_alpha(self):
-        """30% chance fully opaque, otherwise semi-transparent."""
-        if random.random() < 0.30:
-            return 1.0
-        return random.uniform(0.30, 0.70)
+        """100% chance fully opaque (no transparency)."""
+        return 1.0
 
     def _vandalize_background(self, img, msk):
         """Paint random shapes, lines, and noise onto the background."""
@@ -252,7 +250,8 @@ class NailDataset(Dataset):
         noise = np.random.normal(0, noise_strength, img_np.shape)
         img_np = img_np + noise * (1.0 - np.expand_dims(msk_np, -1))
 
-        num_patches = random.randint(8, 18)
+        # Heavily increased number of patches/shapes to destroy background
+        num_patches = random.randint(30, 60)
         for _ in range(num_patches):
             color  = np.random.randint(0, 256, (3,))
             a      = self._pick_alpha()
@@ -306,7 +305,8 @@ class NailDataset(Dataset):
         noise = np.random.normal(0, noise_strength, img_np.shape)
         img_np = img_np + noise * hand_mask
 
-        num_patches = random.randint(6, 14)
+        # Heavily increased number of patches/shapes to destroy hand texture
+        num_patches = random.randint(20, 40)
         for _ in range(num_patches):
             color  = np.random.randint(0, 256, (3,))
             a      = self._pick_alpha()
