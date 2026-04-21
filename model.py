@@ -67,7 +67,7 @@ class PresenceGate(nn.Module):
         self.fc   = nn.Linear(in_ch, 1)
 
     def forward(self, x):
-        return torch.sigmoid(self.fc(self.pool(x).flatten(1)))  # (B, 1)
+        return self.fc(self.pool(x).flatten(1))  # (B, 1) — raw logits, sigmoid applied at loss/inference
 
 
 # ── MobileNetV3-Large prefix encoder ──────────────────────────────────────────
@@ -148,7 +148,7 @@ class NailVTONModel(nn.Module):
         self.eval()
         logits, _logits_inter, gate = self(x)
         prob_nail = torch.softmax(logits, dim=1)[:, 1:2]
-        gate_mask = (gate > gate_threshold).float().unsqueeze(-1).unsqueeze(-1)
+        gate_mask = (torch.sigmoid(gate) > gate_threshold).float().unsqueeze(-1).unsqueeze(-1)
         return (prob_nail * gate_mask > threshold).float()
 
     def count_parameters(self):
