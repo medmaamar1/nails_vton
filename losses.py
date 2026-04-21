@@ -155,8 +155,9 @@ class BinarySegLoss(nn.Module):
         loss       = loss + self.inter_weight * l_inter
 
         # ── Gate BCE ──────────────────────────────────────────────────────────
+        # Cast to float32 — F.binary_cross_entropy is unsafe under AMP autocast
         has_nail = (targets.sum(dim=(-1, -2, -3)) > 0).float()  # (B,)
-        l_gate   = F.binary_cross_entropy(gate.squeeze(1), has_nail)
+        l_gate   = F.binary_cross_entropy(gate.squeeze(1).float(), has_nail.float())
         loss     = loss + self.gate_weight * l_gate
 
         # ── Background-Only Penalty ───────────────────────────────────────────
