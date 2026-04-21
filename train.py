@@ -2,7 +2,7 @@
 Nail VTON Training Script
 --------------------------
 Usage:
-    python train.py --epochs 100 --batch_size 16
+    python train.py --epochs 200 --batch_size 16
 
 Dataset: NailSegmentationDatasetV2 (CSV-based, pre-split).
 Model  : NailVTONModel — binary segmentation only.
@@ -31,7 +31,8 @@ from losses  import BinarySegLoss, compute_miou
 def parse_args():
     p = argparse.ArgumentParser("Nail VTON Training")
     p.add_argument("--data_root",          default=DATA_ROOT)
-    p.add_argument("--epochs",             type=int,   default=100)
+    p.add_argument("--epochs",             type=int,   default=200)
+    p.add_argument("--patience",           type=int,   default=20)
     p.add_argument("--batch_size",         type=int,   default=16)
     p.add_argument("--lr",                 type=float, default=5e-4) # Fine-Tuning LR
     p.add_argument("--image_size",         type=int,   default=448)
@@ -202,10 +203,11 @@ def main():
         for pg, base in zip(optimizer.param_groups, base_lrs):
             pg["lr"] = base * scale
 
-    scaler       = GradScaler("cuda", enabled=use_amp)
-    start_epoch  = 0
+    scaler        = GradScaler("cuda", enabled=use_amp)
+    start_epoch   = 0
     best_val_miou = 0.0
-    history      = []
+    epochs_no_improve = 0
+    history       = []
 
     # ── Resume ──────────────────────────────────────────────────────────────────
     if args.resume and Path(args.resume).exists():
@@ -216,10 +218,11 @@ def main():
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         model.load_state_dict(state_dict)
         optimizer.load_state_dict(ckpt["optimizer"])
-        start_epoch  = ckpt["epoch"] + 1
-        best_val_miou = ckpt.get("best_val_miou", 0.0)
-        history      = ckpt.get("history", [])
-        print(f"Resumed from epoch {start_epoch}  (best mIoU={best_val_miou:.4f})")
+        start_epoch       = ckpt["epoch"] + 1
+        best_val_miou     = ckpt.get("best_val_miou", 0.0)
+        epochs_no_improve = ckpt.get("epochs_no_improve", 0)
+        history           = ckpt.get("history", [])
+        print(f"Resumed from epoch {start_epoch}  (best mIoU={best_val_miou:.4f}, no-improve streak={epochs_no_improve})")
 
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -257,21 +260,29 @@ def main():
         history.append(record)
 
         ckpt_payload = {
-            "epoch"        : epoch,
-            "model"        : model.state_dict(),
-            "optimizer"    : optimizer.state_dict(),
-            "best_val_miou": best_val_miou,
-            "history"      : history,
-            "args"         : vars(args),
+            "epoch"            : epoch,
+            "model"            : model.state_dict(),
+            "optimizer"        : optimizer.state_dict(),
+            "best_val_miou"    : best_val_miou,
+            "epochs_no_improve": epochs_no_improve,
+            "history"          : history,
+            "args"             : vars(args),
         }
 
         torch.save(ckpt_payload, ckpt_dir / "latest.pt")
 
         if val_miou > best_val_miou:
             best_val_miou = val_miou
+            epochs_no_improve = 0
             ckpt_payload["best_val_miou"] = best_val_miou
             torch.save(ckpt_payload, ckpt_dir / "best.pt")
             print(f"  ✓ New best val mIoU: {best_val_miou:.4f}  — saved best.pt")
+        else:
+            epochs_no_improve += 1
+            print(f"  No improvement for {epochs_no_improve}/{args.patience} epochs")
+            if epochs_no_improve >= args.patience:
+                print(f"\nEarly stopping — no improvement for {args.patience} consecutive epochs.")
+                break
 
         with open(ckpt_dir / "history.json", "w") as f:
             json.dump(history, f, indent=2)

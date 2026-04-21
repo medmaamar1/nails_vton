@@ -119,6 +119,17 @@ class NailDataset(Dataset):
             img = TF.hflip(img)
             msk = TF.hflip(msk)
 
+        # Vertical flip — simulates hand photographed from the top (palm up vs down)
+        if random.random() > 0.5:
+            img = TF.vflip(img)
+            msk = TF.vflip(msk)
+
+        # Small rotation — hand held at a slight angle
+        if random.random() > 0.4:
+            angle = random.uniform(-20, 20)
+            img = TF.rotate(img, angle, interpolation=Image.BILINEAR, fill=0)
+            msk = TF.rotate(msk, angle, interpolation=Image.NEAREST,  fill=0)
+
         # Random crop & zoom (simulates close-ups)
         if random.random() > 0.5:
             scale     = random.uniform(0.65, 1.0)
@@ -143,8 +154,12 @@ class NailDataset(Dataset):
             img = self._vandalize_texture(img, msk)
 
         # Background vandalization: force model to ignore noisy non-nail regions
-        if random.random() > 0.6:
+        if random.random() > 0.5:
             img = self._vandalize_background(img, msk)
+
+        # Hand/skin distortion: overlay semi-transparent shapes on the hand area
+        if random.random() > 0.5:
+            img = self._vandalize_hand(img, msk)
 
         # Global Gaussian noise: simulate camera noise and low-quality images
         if random.random() > 0.75:
@@ -220,33 +235,111 @@ class NailDataset(Dataset):
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
     def _vandalize_background(self, img, msk):
-        """Paint random color patches onto non-nail background regions.
-        Prevents the model from using texture shortcuts (smooth skin = background)."""
+        """Paint random shapes and lines onto non-nail background to prevent texture shortcuts."""
         img_np  = np.array(img).astype(np.float32)
         msk_np  = np.array(msk).astype(np.float32) / 255.0
         h, w, _ = img_np.shape
         bg_mask = np.expand_dims(1.0 - msk_np, axis=-1)  # non-nail area
 
-        num_patches = random.randint(3, 8)
+        num_patches = random.randint(5, 12)
         for _ in range(num_patches):
-            color = np.random.randint(0, 256, (3,))
-            a     = random.uniform(0.2, 0.55)
-            dtype = random.choice(["rect", "circle"])
+            color  = np.random.randint(0, 256, (3,))
+            a      = random.uniform(0.25, 0.55)
+            dtype  = random.choice(["rect", "circle", "line", "cross"])
             s_mask = np.zeros((h, w, 1))
 
             if dtype == "rect":
-                rw, rh = random.randint(10, 50), random.randint(10, 50)
+                rw, rh = random.randint(15, 70), random.randint(15, 70)
                 ry     = random.randint(0, max(1, h - rh))
                 rx     = random.randint(0, max(1, w - rw))
                 s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
-            else:  # circle
-                radius = random.randint(8, 30)
+
+            elif dtype == "circle":
+                radius = random.randint(10, 40)
                 ry, rx = random.randint(0, h), random.randint(0, w)
                 yy, xx = np.ogrid[:h, :w]
                 s_mask = ((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float)
                 s_mask = np.expand_dims(s_mask, -1)
 
-            piece = s_mask * bg_mask * a
+            elif dtype == "line":
+                # Thick diagonal/straight line across the background
+                angle  = random.uniform(0, np.pi)
+                thick  = random.randint(3, 10)
+                cos_a, sin_a = np.cos(angle), np.sin(angle)
+                yy, xx = np.ogrid[:h, :w]
+                proj   = xx * cos_a + yy * sin_a
+                offset = random.randint(0, h + w)
+                s_mask = (np.abs(proj - offset) < thick).astype(float)
+                s_mask = np.expand_dims(s_mask, -1)
+
+            elif dtype == "cross":
+                # Plus-sign shape at a random location
+                cy, cx = random.randint(0, h), random.randint(0, w)
+                arm    = random.randint(10, 35)
+                thick  = random.randint(3, 8)
+                s_mask[max(0,cy-thick):min(h,cy+thick), max(0,cx-arm):min(w,cx+arm), :] = 1.0
+                s_mask[max(0,cy-arm):min(h,cy+arm), max(0,cx-thick):min(w,cx+thick), :] = 1.0
+
+            piece  = s_mask * bg_mask * a
+            img_np = img_np * (1 - piece) + (color * piece)
+
+        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
+
+    def _vandalize_hand(self, img, msk):
+        """Overlay semi-transparent shapes on the hand/skin region (non-nail foreground).
+        Teaches the model that skin texture is irrelevant — only shape matters."""
+        img_np  = np.array(img).astype(np.float32)
+        msk_np  = np.array(msk).astype(np.float32) / 255.0
+        h, w, _ = img_np.shape
+        # Target: the whole image minus nail area — approximates hand/skin
+        hand_mask = np.expand_dims(1.0 - msk_np, axis=-1)
+
+        num_patches = random.randint(4, 9)
+        for _ in range(num_patches):
+            color  = np.random.randint(0, 256, (3,))
+            a      = random.uniform(0.2, 0.45)  # kept moderate — don't erase the hand
+            dtype  = random.choice(["rect", "circle", "line", "stripe_thin"])
+            s_mask = np.zeros((h, w, 1))
+
+            if dtype == "rect":
+                rw, rh = random.randint(10, 45), random.randint(10, 45)
+                ry     = random.randint(0, max(1, h - rh))
+                rx     = random.randint(0, max(1, w - rw))
+                s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
+
+            elif dtype == "circle":
+                radius = random.randint(6, 25)
+                ry, rx = random.randint(0, h), random.randint(0, w)
+                yy, xx = np.ogrid[:h, :w]
+                s_mask = ((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float)
+                s_mask = np.expand_dims(s_mask, -1)
+
+            elif dtype == "line":
+                angle  = random.uniform(0, np.pi)
+                thick  = random.randint(2, 6)
+                cos_a, sin_a = np.cos(angle), np.sin(angle)
+                yy, xx = np.ogrid[:h, :w]
+                proj   = xx * cos_a + yy * sin_a
+                offset = random.randint(0, h + w)
+                s_mask = (np.abs(proj - offset) < thick).astype(float)
+                s_mask = np.expand_dims(s_mask, -1)
+
+            elif dtype == "stripe_thin":
+                # A pair of thin parallel lines
+                angle  = random.uniform(0, np.pi)
+                thick  = random.randint(1, 3)
+                gap    = random.randint(8, 20)
+                cos_a, sin_a = np.cos(angle), np.sin(angle)
+                yy, xx = np.ogrid[:h, :w]
+                proj   = xx * cos_a + yy * sin_a
+                offset = random.randint(0, h + w)
+                s_mask = (
+                    (np.abs(proj - offset) < thick) |
+                    (np.abs(proj - offset - gap) < thick)
+                ).astype(float)
+                s_mask = np.expand_dims(s_mask, -1)
+
+            piece  = s_mask * hand_mask * a
             img_np = img_np * (1 - piece) + (color * piece)
 
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
