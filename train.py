@@ -17,21 +17,8 @@ import time
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
-
-
-def _unwrap(model):
-    """Return the raw model regardless of DataParallel wrapping."""
-    return model.module if isinstance(model, nn.DataParallel) else model
-
-
-def _clear_cuda_cache():
-    """Empty cache on every visible GPU, not just GPU 0."""
-    for i in range(torch.cuda.device_count()):
-        with torch.cuda.device(i):
-            torch.cuda.empty_cache()
 
 sys.path.insert(0, str(Path(__file__).parent))
 from dataset import make_loaders, DATA_ROOT
@@ -82,7 +69,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         # Periodic GC to prevent accumulation
         if i > 0 and i % 100 == 0:
             gc.collect(2)
-            _clear_cuda_cache()
+            torch.cuda.empty_cache()
 
         try:
             batch = next(loader_iter)
@@ -121,7 +108,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             mem = psutil.virtual_memory().used / (1024**3)
             print(f"  step {i+1:04d}/{n_batches} | loss={cur_loss:.4f}  miou={cur_miou:.4f} | RAM={mem:.1f}GB")
             torch.cuda.synchronize()
-            _clear_cuda_cache()
+            torch.cuda.empty_cache()
             gc.collect(2)
 
         # Surgical nullification
@@ -129,13 +116,11 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         target       = None
         logits       = None
         logits_inter = None
-        gate         = None
         loss         = None
 
         if limit is not None and i + 1 >= limit:
             break
 
-    del loader_iter
     return total_loss / n_batches, total_miou / n_batches
 
 
@@ -171,10 +156,8 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
         target       = None
         logits       = None
         logits_inter = None
-        gate         = None
         loss         = None
 
-    del loader_iter
     if n_batches == 0:
         return 0.0, 0.0
     return total_loss / n_batches, total_miou / n_batches
@@ -241,16 +224,6 @@ def main():
         history           = ckpt.get("history", [])
         print(f"Resumed from epoch {start_epoch}  (best mIoU={best_val_miou:.4f}, no-improve streak={epochs_no_improve})")
 
-    # ── Multi-GPU (DataParallel) ─────────────────────────────────────────────────
-    # Wrapping happens AFTER resume so state_dict loads cleanly into the raw model,
-    # and AFTER param extraction so the optimizer already holds the right references.
-    n_gpus = torch.cuda.device_count()
-    if n_gpus > 1:
-        model = nn.DataParallel(model, device_ids=list(range(n_gpus)))
-        print(f"DataParallel enabled — using {n_gpus} GPUs: {list(range(n_gpus))}")
-    else:
-        print(f"Single GPU training")
-
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -288,7 +261,7 @@ def main():
 
         ckpt_payload = {
             "epoch"            : epoch,
-            "model"            : _unwrap(model).state_dict(),  # always saved without module. prefix
+            "model"            : model.state_dict(),
             "optimizer"        : optimizer.state_dict(),
             "best_val_miou"    : best_val_miou,
             "epochs_no_improve": epochs_no_improve,
@@ -310,9 +283,6 @@ def main():
             if epochs_no_improve >= args.patience:
                 print(f"\nEarly stopping — no improvement for {args.patience} consecutive epochs.")
                 break
-
-        del ckpt_payload
-        gc.collect()
 
         with open(ckpt_dir / "history.json", "w") as f:
             json.dump(history, f, indent=2)
