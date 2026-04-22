@@ -419,20 +419,20 @@ def make_loaders(base_path, batch_size=16, num_workers=2, image_size=IMAGE_SIZE)
 
     train_loader = DataLoader(
         train_ds,
-        batch_size       = batch_size,
-        shuffle          = True,
-        num_workers      = num_workers,
-        pin_memory       = False,
-        drop_last        = True,
-        persistent_workers = False,
+        batch_size         = batch_size,
+        shuffle            = True,
+        num_workers        = num_workers,
+        pin_memory         = False,
+        drop_last          = True,
+        persistent_workers = num_workers > 0,  # keep workers alive — avoids respawn leak
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size       = batch_size,
-        shuffle          = False,
-        num_workers      = num_workers,
-        pin_memory       = False,
-        persistent_workers = False,
+        batch_size         = batch_size,
+        shuffle            = False,
+        num_workers        = num_workers,
+        pin_memory         = False,
+        persistent_workers = num_workers > 0,
     )
     return train_loader, val_loader
 

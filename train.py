@@ -241,6 +241,9 @@ def main():
 
     # ── Training loop ───────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.epochs):
+        gc.collect()
+        torch.cuda.empty_cache()
+
         set_lr(epoch)
         lrs = [f"{pg['lr']:.2e}" for pg in optimizer.param_groups]
         t0  = time.time()
