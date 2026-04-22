@@ -116,7 +116,9 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         target       = None
         logits       = None
         logits_inter = None
+        gate         = None
         loss         = None
+        del image, target, logits, logits_inter, gate, loss
 
         if limit is not None and i + 1 >= limit:
             break
@@ -156,7 +158,9 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
         target       = None
         logits       = None
         logits_inter = None
+        gate         = None
         loss         = None
+        del image, target, logits, logits_inter, gate, loss
 
     if n_batches == 0:
         return 0.0, 0.0
