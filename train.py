@@ -41,7 +41,7 @@ def parse_args():
     p.add_argument("--image_size",         type=int,   default=448)
     p.add_argument("--num_workers",        type=int,   default=2)
     p.add_argument("--ckpt_dir",           default="checkpoints")
-    p.add_argument("--resume",             default=None)
+    p.add_argument("--resume",             default="/kaggle/input/models/maamarmohamed12/nails-89/pytorch/default/1/best_nail_vton (1).pt")
     p.add_argument("--no_amp",             action="store_true")
     p.add_argument("--warmup_epochs",      type=int,   default=10) # Longer warmup for stability
     p.add_argument("--limit_train_batches",type=int,   default=None)
@@ -201,6 +201,11 @@ def main():
         print(f"Device: {device}  |  AMP: {use_amp}  |  DDP: {distributed}  |  WORLD_SIZE: {world_size}")
         if distributed:
             print("Using DistributedDataParallel for multi-GPU to avoid DataParallel RAM growth.")
+        # Log which checkpoint is being used for resume
+        if args.resume:
+            print(f"[INFO] Training will resume from checkpoint: {args.resume}")
+        else:
+            print("[INFO] Training will start from scratch (no checkpoint provided).")
 
     local_batch_size = args.batch_size
     if distributed:
