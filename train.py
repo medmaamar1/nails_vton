@@ -183,13 +183,18 @@ def main():
     model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
     model.count_parameters()
 
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs!")
+        model = torch.nn.DataParallel(model)
+
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = BinarySegLoss().to(device)
 
     # ── Optimizer (encoder 10× lower LR) ───────────────────────────────────────
-    encoder_params = list(model.encoder_low.parameters()) + list(model.encoder_high.parameters())
+    base_model = getattr(model, "module", model)
+    encoder_params = list(base_model.encoder_low.parameters()) + list(base_model.encoder_high.parameters())
     encoder_ids    = {id(p) for p in encoder_params}
-    decoder_params = [p for p in model.parameters() if id(p) not in encoder_ids]
+    decoder_params = [p for p in base_model.parameters() if id(p) not in encoder_ids]
 
     optimizer = optim.AdamW([
         {"params": encoder_params, "lr": args.lr * 0.1},
@@ -216,7 +221,7 @@ def main():
         # Strip 'module.' prefix if saved from DataParallel
         if any(k.startswith("module.") for k in state_dict):
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        model.load_state_dict(state_dict)
+        getattr(model, "module", model).load_state_dict(state_dict)
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch       = ckpt["epoch"] + 1
         best_val_miou     = ckpt.get("best_val_miou", 0.0)
@@ -261,7 +266,7 @@ def main():
 
         ckpt_payload = {
             "epoch"            : epoch,
-            "model"            : model.state_dict(),
+            "model"            : getattr(model, "module", model).state_dict(),
             "optimizer"        : optimizer.state_dict(),
             "best_val_miou"    : best_val_miou,
             "epochs_no_improve": epochs_no_improve,
