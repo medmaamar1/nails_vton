@@ -125,7 +125,8 @@ class NailVTONModel(nn.Module):
         self.gate       = PresenceGate(FUSE)
 
     def forward(self, x):
-        with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled(), cache_enabled=False):
+        # Disabled cache_enabled=False for P100 as it lacks Turing+ architecture features
+        with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled()):
             x_half                   = F.interpolate(x, scale_factor=0.5, mode="bilinear", align_corners=False)
             feat_high                = self.encoder_high(x)
             feat_low_s4, feat_low_s8 = self.encoder_low(x_half)
