@@ -99,6 +99,7 @@ class NailDataset(Dataset):
         img_t  = TF.normalize(TF.to_tensor(img), MEAN, STD)       # (3, H, W)
         msk_np = np.array(msk, dtype=np.float32) / 255.0          # 0.0 or 1.0
         msk_t  = torch.from_numpy(msk_np).unsqueeze(0)            # (1, H, W)
+        del msk_np
 
         # Binarize: treat any pixel > 0.5 as nail
         msk_t = (msk_t > 0.5).float()
@@ -178,52 +179,53 @@ class NailDataset(Dataset):
         Step 1: Paint Base Coat. 
         Step 2: Paint Art (on top of Base Coat).
         """
-        img_np = np.array(img).astype(np.float32)
-        msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
+        img_np  = np.array(img).astype(np.float32)
+        msk_np  = np.array(msk).astype(np.float32) / 255.0  # (H, W)
         h, w, _ = img_np.shape
         mask_3d = np.expand_dims(msk_np, axis=-1)
-        
+        del msk_np
+
         # ── Step 1: Base Coat (80% chance) ───────────────────────────────────
         if random.random() > 0.2:
             color = np.random.randint(0, 256, (3,))
             a = random.uniform(0.4, 0.9)
-            if random.random() > 0.4: # Solid
+            if random.random() > 0.4:  # Solid
                 img_np = img_np * (1 - mask_3d * a) + (color * mask_3d * a)
-            else: # Gradient
+            else:  # Gradient
                 grad = np.linspace(0, 1, h).reshape(h, 1, 1)
                 img_np = img_np * (1 - mask_3d * a * grad) + (color * mask_3d * a * grad)
+                del grad
 
         # ── Step 2: High-Density Art Overlays (Glitter, Dots, Rects, Stripes) ──
         if random.random() > 0.2:
-            num_designs = random.randint(5, 15) # High density
+            num_designs = random.randint(5, 15)
             for _ in range(num_designs):
                 dtype = random.choice(["rect", "star", "stripe", "circle"])
                 color = np.random.randint(0, 256, (3,))
                 a     = random.uniform(0.6, 0.95)
-                
                 s_mask = np.zeros((h, w, 1))
-                
+
                 if dtype == "rect":
-                    rw, rh = random.randint(5, 15), random.randint(5, 15) # Smaller
+                    rw, rh = random.randint(5, 15), random.randint(5, 15)
                     ry, rx = random.randint(0, h-rh), random.randint(0, w-rw)
                     s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
-                
+
                 elif dtype == "circle":
                     radius = random.randint(3, 8)
                     ry, rx = random.randint(0, h), random.randint(0, w)
                     yy, xx = np.ogrid[:h, :w]
-                    dist = (yy - ry)**2 + (xx - rx)**2
-                    s_mask = (dist <= radius**2).astype(float)
-                    s_mask = np.expand_dims(s_mask, -1)
-                
+                    dist   = (yy - ry)**2 + (xx - rx)**2
+                    s_mask = np.expand_dims((dist <= radius**2).astype(float), -1)
+                    del yy, xx, dist
+
                 elif dtype == "stripe":
                     angle = random.uniform(0, np.pi)
                     cos_a, sin_a = np.cos(angle), np.sin(angle)
                     thick = random.randint(2, 4)
                     yy, xx = np.ogrid[:h, :w]
-                    proj = xx * cos_a + yy * sin_a
-                    s_mask = (np.abs(proj - random.randint(0, h+w)) < thick).astype(float)
-                    s_mask = np.expand_dims(s_mask, -1)
+                    proj   = xx * cos_a + yy * sin_a
+                    s_mask = np.expand_dims((np.abs(proj - random.randint(0, h+w)) < thick).astype(float), -1)
+                    del yy, xx, proj
 
                 elif dtype == "star":
                     ry, rx = random.randint(5, h-5), random.randint(5, w-5)
@@ -231,11 +233,13 @@ class NailDataset(Dataset):
                     s_mask[ry-size:ry+size, rx-1:rx+1, :] = 1.0
                     s_mask[ry-1:ry+1, rx-size:rx+size, :] = 1.0
 
-                # Bake ON TOP
                 final_piece_mask = s_mask * mask_3d * a
                 img_np = img_np * (1 - final_piece_mask) + (color * final_piece_mask)
+                del s_mask, final_piece_mask
 
-        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
+        result = Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
+        del img_np, mask_3d
+        return result
 
     def _pick_alpha(self):
         """100% chance fully opaque (no transparency)."""
@@ -271,8 +275,8 @@ class NailDataset(Dataset):
                 radius = random.randint(15, 60)
                 ry, rx = random.randint(0, h), random.randint(0, w)
                 yy, xx = np.ogrid[:h, :w]
-                s_mask = ((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
+                s_mask = np.expand_dims(((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float), -1)
+                del yy, xx
 
             elif dtype == "line":
                 angle  = random.uniform(0, np.pi)
@@ -280,9 +284,8 @@ class NailDataset(Dataset):
                 cos_a, sin_a = np.cos(angle), np.sin(angle)
                 yy, xx = np.ogrid[:h, :w]
                 proj   = xx * cos_a + yy * sin_a
-                offset = random.randint(0, h + w)
-                s_mask = (np.abs(proj - offset) < thick).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
+                s_mask = np.expand_dims((np.abs(proj - random.randint(0, h + w)) < thick).astype(float), -1)
+                del yy, xx, proj
 
             elif dtype == "cross":
                 cy, cx = random.randint(0, h), random.randint(0, w)
@@ -329,8 +332,8 @@ class NailDataset(Dataset):
                 radius = random.randint(8, 35)
                 ry, rx = random.randint(0, h), random.randint(0, w)
                 yy, xx = np.ogrid[:h, :w]
-                s_mask = ((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
+                s_mask = np.expand_dims(((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float), -1)
+                del yy, xx
 
             elif dtype == "line":
                 angle  = random.uniform(0, np.pi)
@@ -338,9 +341,8 @@ class NailDataset(Dataset):
                 cos_a, sin_a = np.cos(angle), np.sin(angle)
                 yy, xx = np.ogrid[:h, :w]
                 proj   = xx * cos_a + yy * sin_a
-                offset = random.randint(0, h + w)
-                s_mask = (np.abs(proj - offset) < thick).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
+                s_mask = np.expand_dims((np.abs(proj - random.randint(0, h + w)) < thick).astype(float), -1)
+                del yy, xx, proj
 
             elif dtype == "stripe_thin":
                 angle  = random.uniform(0, np.pi)
@@ -350,11 +352,10 @@ class NailDataset(Dataset):
                 yy, xx = np.ogrid[:h, :w]
                 proj   = xx * cos_a + yy * sin_a
                 offset = random.randint(0, h + w)
-                s_mask = (
-                    (np.abs(proj - offset) < thick) |
-                    (np.abs(proj - offset - gap) < thick)
-                ).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
+                s_mask = np.expand_dims(
+                    ((np.abs(proj - offset) < thick) | (np.abs(proj - offset - gap) < thick)).astype(float), -1
+                )
+                del yy, xx, proj
 
             piece  = s_mask * hand_mask * a
             img_np = img_np * (1 - piece) + (color * piece)
