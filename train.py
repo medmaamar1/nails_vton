@@ -72,36 +72,33 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.cuda.empty_cache()
 
         try:
-            batch = next(loader_iter)
+            img_cpu, tgt_cpu = next(loader_iter)
         except StopIteration:
             break
 
-        # Minimal GPU transfer
-        image  = batch[0].to(device, non_blocking=True)  # (B, 3, H, W)
-        target = batch[1].to(device, non_blocking=True)   # (B, 1, H, W)
-        batch  = None  # Kill CPU tensor immediately
+        image  = img_cpu.to(device, non_blocking=True)
+        target = tgt_cpu.to(device, non_blocking=True)
+        del img_cpu, tgt_cpu
 
         optimizer.zero_grad(set_to_none=True)
 
-        def run_step(img, tgt):
-            with autocast("cuda", enabled=use_amp):
-                out1, out2, gate_out = model(img)
-                loss_val = criterion((out1, out2, gate_out), tgt)
+        with autocast("cuda", enabled=use_amp):
+            out = model(image)  # Tuple: (logits, logits_inter, gate)
+            loss_val = criterion(out, target)
 
-            if use_amp:
-                scaler.scale(loss_val).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss_val.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                optimizer.step()
+        if use_amp:
+            scaler.scale(loss_val).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss_val.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
 
-            return loss_val.item(), compute_miou(out1.detach(), tgt)
-
-        cur_loss, cur_miou = run_step(image, target)
+        cur_loss = loss_val.item()
+        cur_miou = compute_miou(out[0].detach(), target)
 
         total_loss += cur_loss
         total_miou += cur_miou
@@ -111,12 +108,10 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             print(f"  step {i+1:04d}/{n_batches} | loss={cur_loss:.4f}  miou={cur_miou:.4f} | RAM={mem:.1f}GB")
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-            gc.collect(2)
+            gc.collect()
 
-        # Cleanup
-        image  = None
-        target = None
-        del image, target
+        # Aggressively break references
+        del image, target, out, loss_val
 
         if limit is not None and i + 1 >= limit:
             break
@@ -136,28 +131,26 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
 
     for i in range(n_batches):
         try:
-            batch = next(loader_iter)
+            img_cpu, tgt_cpu = next(loader_iter)
         except StopIteration:
             break
 
-        image  = batch[0].to(device, non_blocking=True)
-        target = batch[1].to(device, non_blocking=True)
-        batch  = None
+        image  = img_cpu.to(device, non_blocking=True)
+        target = tgt_cpu.to(device, non_blocking=True)
+        del img_cpu, tgt_cpu
 
-        def run_val_step(img, tgt):
-            with autocast("cuda", enabled=use_amp):
-                out1, out2, gate_out = model(img)
-                loss_val = criterion((out1, out2, gate_out), tgt)
-            return loss_val.item(), compute_miou(out1.detach(), tgt)
+        with autocast("cuda", enabled=use_amp):
+            out = model(image)
+            loss_val = criterion(out, target)
 
-        cur_loss, cur_miou = run_val_step(image, target)
+        cur_loss = loss_val.item()
+        cur_miou = compute_miou(out[0].detach(), target)
+        
         total_loss += cur_loss
         total_miou += cur_miou
 
-        # Cleanup
-        image  = None
-        target = None
-        del image, target
+        # Aggressively break references
+        del image, target, out, loss_val
 
     if n_batches == 0:
         return 0.0, 0.0
