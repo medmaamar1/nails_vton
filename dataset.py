@@ -153,13 +153,20 @@ class NailDataset(Dataset):
         if random.random() > 0.5:
             img = self._vandalize_texture(img, msk)
 
-        # Background vandalization: force model to ignore noisy non-nail regions
+        # 50% Sane, 50% Noisy Hands/Background
         if random.random() > 0.5:
-            img = self._vandalize_background(img, msk)
+            # When we do apply noise, 50% chance they BOTH get noisy (overlap)
+            # 50% chance only ONE gets noisy (either Background OR Hand)
+            is_overlap = (random.random() > 0.5)
 
-        # Hand/skin distortion: overlay semi-transparent shapes on the hand area
-        if random.random() > 0.5:
-            img = self._vandalize_hand(img, msk)
+            if is_overlap:
+                img = self._vandalize_background(img, msk)
+                img = self._vandalize_hand(img, msk)
+            else:
+                if random.random() > 0.5:
+                    img = self._vandalize_background(img, msk)
+                else:
+                    img = self._vandalize_hand(img, msk)
 
         # Global Gaussian noise: simulate camera noise and low-quality images
         if random.random() > 0.75:
@@ -235,8 +242,10 @@ class NailDataset(Dataset):
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
     def _pick_alpha(self):
-        """100% chance fully opaque (no transparency)."""
-        return 1.0
+        """70% chance fully opaque (1.0), 30% chance semi-transparent."""
+        if random.random() < 0.70:
+            return 1.0
+        return random.uniform(0.3, 0.9)
 
     def _vandalize_background(self, img, msk):
         """Paint random shapes, lines, and noise onto the background."""
