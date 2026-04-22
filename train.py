@@ -83,23 +83,25 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
 
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast("cuda", enabled=use_amp):
-            logits, logits_inter, gate = model(image)   # (B,2,H,W), (B,2,h,w), (B,1)
-            loss = criterion((logits, logits_inter, gate), target)
+        def run_step(img, tgt):
+            with autocast("cuda", enabled=use_amp):
+                out1, out2, gate_out = model(img)
+                loss_val = criterion((out1, out2, gate_out), tgt)
 
-        if use_amp:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
+            if use_amp:
+                scaler.scale(loss_val).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss_val.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                optimizer.step()
 
-        cur_loss = loss.item()
-        cur_miou = compute_miou(logits.detach(), target)
+            return loss_val.item(), compute_miou(out1.detach(), tgt)
+
+        cur_loss, cur_miou = run_step(image, target)
 
         total_loss += cur_loss
         total_miou += cur_miou
@@ -111,14 +113,10 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.cuda.empty_cache()
             gc.collect(2)
 
-        # Surgical nullification
-        image        = None
-        target       = None
-        logits       = None
-        logits_inter = None
-        gate         = None
-        loss         = None
-        del image, target, logits, logits_inter, gate, loss
+        # Cleanup
+        image  = None
+        target = None
+        del image, target
 
         if limit is not None and i + 1 >= limit:
             break
@@ -146,21 +144,20 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
         target = batch[1].to(device, non_blocking=True)
         batch  = None
 
-        with autocast("cuda", enabled=use_amp):
-            logits, logits_inter, gate = model(image)
-            loss = criterion((logits, logits_inter, gate), target)
+        def run_val_step(img, tgt):
+            with autocast("cuda", enabled=use_amp):
+                out1, out2, gate_out = model(img)
+                loss_val = criterion((out1, out2, gate_out), tgt)
+            return loss_val.item(), compute_miou(out1.detach(), tgt)
 
-        total_loss += loss.item()
-        total_miou += compute_miou(logits, target)
+        cur_loss, cur_miou = run_val_step(image, target)
+        total_loss += cur_loss
+        total_miou += cur_miou
 
         # Cleanup
-        image        = None
-        target       = None
-        logits       = None
-        logits_inter = None
-        gate         = None
-        loss         = None
-        del image, target, logits, logits_inter, gate, loss
+        image  = None
+        target = None
+        del image, target
 
     if n_batches == 0:
         return 0.0, 0.0
