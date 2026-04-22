@@ -140,7 +140,7 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
         target = tgt_cpu.to(device, non_blocking=True)
         del img_cpu, tgt_cpu
 
-        with autocast("cuda", enabled=use_amp, cache_enabled=False, cache_enabled=False):
+        with autocast("cuda", enabled=use_amp, cache_enabled=False):
             out = model(image)
             loss_val = criterion(out, target)
 
