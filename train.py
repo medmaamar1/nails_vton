@@ -17,8 +17,21 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
+
+
+def _unwrap(model):
+    """Return the raw model regardless of DataParallel wrapping."""
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
+def _clear_cuda_cache():
+    """Empty cache on every visible GPU, not just GPU 0."""
+    for i in range(torch.cuda.device_count()):
+        with torch.cuda.device(i):
+            torch.cuda.empty_cache()
 
 sys.path.insert(0, str(Path(__file__).parent))
 from dataset import make_loaders, DATA_ROOT
@@ -69,7 +82,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         # Periodic GC to prevent accumulation
         if i > 0 and i % 100 == 0:
             gc.collect(2)
-            torch.cuda.empty_cache()
+            _clear_cuda_cache()
 
         try:
             batch = next(loader_iter)
@@ -108,7 +121,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             mem = psutil.virtual_memory().used / (1024**3)
             print(f"  step {i+1:04d}/{n_batches} | loss={cur_loss:.4f}  miou={cur_miou:.4f} | RAM={mem:.1f}GB")
             torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+            _clear_cuda_cache()
             gc.collect(2)
 
         # Surgical nullification
@@ -169,17 +182,11 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def unwrap(model):
-    """Return base model regardless of DataParallel wrapping."""
-    return model.module if isinstance(model, torch.nn.DataParallel) else model
-
-
 def main():
     args   = parse_args()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     use_amp = not args.no_amp and device.type == "cuda"
-    n_gpus  = torch.cuda.device_count() if device.type == "cuda" else 0
-    print(f"Device: {device}  |  AMP: {use_amp}  |  GPUs: {max(n_gpus, 1)}")
+    print(f"Device: {device}  |  AMP: {use_amp}")
 
     # ── Data ────────────────────────────────────────────────────────────────────
     train_loader, val_loader = make_loaders(
@@ -208,12 +215,6 @@ def main():
 
     base_lrs = [pg["lr"] for pg in optimizer.param_groups]
 
-    # ── Wrap with DataParallel AFTER building optimizer param groups ─────────────
-    if n_gpus > 1:
-        model = torch.nn.DataParallel(model)
-        print(f"DataParallel across {n_gpus} GPUs "
-              f"({args.batch_size // n_gpus} samples/GPU per step)")
-
     def set_lr(epoch):
         scale = get_lr_scale(epoch, args.warmup_epochs, args.epochs)
         for pg, base in zip(optimizer.param_groups, base_lrs):
@@ -232,7 +233,7 @@ def main():
         # Strip 'module.' prefix if saved from DataParallel
         if any(k.startswith("module.") for k in state_dict):
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        unwrap(model).load_state_dict(state_dict)
+        model.load_state_dict(state_dict)
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch       = ckpt["epoch"] + 1
         best_val_miou     = ckpt.get("best_val_miou", 0.0)
@@ -240,14 +241,21 @@ def main():
         history           = ckpt.get("history", [])
         print(f"Resumed from epoch {start_epoch}  (best mIoU={best_val_miou:.4f}, no-improve streak={epochs_no_improve})")
 
+    # ── Multi-GPU (DataParallel) ─────────────────────────────────────────────────
+    # Wrapping happens AFTER resume so state_dict loads cleanly into the raw model,
+    # and AFTER param extraction so the optimizer already holds the right references.
+    n_gpus = torch.cuda.device_count()
+    if n_gpus > 1:
+        model = nn.DataParallel(model, device_ids=list(range(n_gpus)))
+        print(f"DataParallel enabled — using {n_gpus} GPUs: {list(range(n_gpus))}")
+    else:
+        print(f"Single GPU training")
+
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Training loop ───────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.epochs):
-        gc.collect()
-        torch.cuda.empty_cache()
-
         set_lr(epoch)
         lrs = [f"{pg['lr']:.2e}" for pg in optimizer.param_groups]
         t0  = time.time()
@@ -280,7 +288,7 @@ def main():
 
         ckpt_payload = {
             "epoch"            : epoch,
-            "model"            : unwrap(model).state_dict(),
+            "model"            : _unwrap(model).state_dict(),  # always saved without module. prefix
             "optimizer"        : optimizer.state_dict(),
             "best_val_miou"    : best_val_miou,
             "epochs_no_improve": epochs_no_improve,
