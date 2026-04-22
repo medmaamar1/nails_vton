@@ -20,6 +20,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 import torchvision.transforms.functional as TF
 from PIL import Image, ImageOps
 
@@ -405,16 +406,28 @@ def _print_augmentation_stats(train_ds, val_ds):
     print(f"{'─'*60}\n")
 
 
-def make_loaders(base_path, batch_size=16, num_workers=2, image_size=IMAGE_SIZE):
+def make_loaders(base_path, batch_size=16, num_workers=2, image_size=IMAGE_SIZE,
+                 distributed=False, rank=0, world_size=1):
     train_ds = NailDataset(base_path, split="train", augment=True,  image_size=image_size)
     val_ds   = NailDataset(base_path, split="val",   augment=False, image_size=image_size)
 
     _print_augmentation_stats(train_ds, val_ds)
 
+    train_sampler = None
+    val_sampler   = None
+    if distributed:
+        train_sampler = DistributedSampler(
+            train_ds, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True
+        )
+        val_sampler = DistributedSampler(
+            val_ds, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False
+        )
+
     train_loader = DataLoader(
         train_ds,
         batch_size       = batch_size,
-        shuffle          = True,
+        shuffle          = (train_sampler is None),
+        sampler          = train_sampler,
         num_workers      = num_workers,
         pin_memory       = False,
         drop_last        = True,
@@ -424,6 +437,7 @@ def make_loaders(base_path, batch_size=16, num_workers=2, image_size=IMAGE_SIZE)
         val_ds,
         batch_size       = batch_size,
         shuffle          = False,
+        sampler          = val_sampler,
         num_workers      = num_workers,
         pin_memory       = False,
         persistent_workers = False,
