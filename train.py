@@ -108,6 +108,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             print(f"  step {i+1:04d}/{n_batches} | loss={cur_loss:.4f}  miou={cur_miou:.4f} | RAM={mem:.1f}GB")
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
+            torch.clear_autocast_cache()
             gc.collect()
 
         # Aggressively break references
@@ -139,7 +140,7 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
         target = tgt_cpu.to(device, non_blocking=True)
         del img_cpu, tgt_cpu
 
-        with autocast("cuda", enabled=use_amp):
+        with autocast("cuda", enabled=use_amp, cache_enabled=False, cache_enabled=False):
             out = model(image)
             loss_val = criterion(out, target)
 
