@@ -265,7 +265,15 @@ def main():
         # Strip 'module.' prefix if saved from DataParallel
         if any(k.startswith("module.") for k in state_dict):
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        base_model.load_state_dict(state_dict)
+        
+        # Strict=False to handle potential structure changes (e.g. head_inter, gate)
+        missing, unexpected = base_model.load_state_dict(state_dict, strict=False)
+        if is_main_process:
+            if missing:
+                print(f"[WARN] Missing keys during resume (likely new layers): {missing}")
+            if unexpected:
+                print(f"[WARN] Unexpected keys during resume (likely old layers): {unexpected}")
+
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch       = ckpt["epoch"] + 1
         best_val_miou     = ckpt.get("best_val_miou", 0.0)
