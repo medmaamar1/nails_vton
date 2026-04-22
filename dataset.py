@@ -153,13 +153,15 @@ class NailDataset(Dataset):
         if random.random() > 0.5:
             img = self._vandalize_texture(img, msk)
 
-        # Background vandalization: force model to ignore noisy non-nail regions
+        # 50% of samples are fully clean (no bg/hand noise).
+        # The other 50% enter the noisy group where bg and hand are each
+        # applied independently — so within that group some get only bg,
+        # some only hand, some both.
         if random.random() > 0.5:
-            img = self._vandalize_background(img, msk)
-
-        # Hand/skin distortion: overlay semi-transparent shapes on the hand area
-        if random.random() > 0.5:
-            img = self._vandalize_hand(img, msk)
+            if random.random() > 0.5:
+                img = self._vandalize_background(img, msk)
+            if random.random() > 0.5:
+                img = self._vandalize_hand(img, msk)
 
         # Global Gaussian noise: simulate camera noise and low-quality images
         if random.random() > 0.75:
@@ -366,17 +368,18 @@ def _print_augmentation_stats(train_ds, val_ds):
     def count(p):
         return round(n_train * p)
 
-    p_hflip   = 0.50
-    p_vflip   = 0.50
-    p_rotate  = 0.60
-    p_crop    = 0.50
-    p_bg      = 0.50
-    p_hand    = 0.50
-    p_texture = 0.50
-    p_noise   = 0.25
+    p_hflip      = 0.50
+    p_vflip      = 0.50
+    p_rotate     = 0.60
+    p_crop       = 0.50
+    p_noisy_group = 0.50  # gate: 50% clean, 50% enter noisy group
+    p_bg_hand     = p_noisy_group * 0.50  # within noisy group, each fires at 50%
+    p_texture    = 0.50
+    p_noise      = 0.25
 
-    p_none = (1-p_hflip)*(1-p_vflip)*(1-p_rotate)*(1-p_crop)*(1-p_bg)*(1-p_hand)*(1-p_texture)*(1-p_noise)
+    p_none = (1-p_hflip)*(1-p_vflip)*(1-p_rotate)*(1-p_crop)*(1-p_bg_hand)*(1-p_texture)*(1-p_noise)
     p_any  = 1.0 - p_none
+    p_clean_bg_hand = 1.0 - p_noisy_group  # exactly 50% see no bg/hand noise
 
     print(f"\n{'─'*60}")
     print(f"  Dataset            train={n_train}  val={n_val}  total={n_total}")
@@ -388,8 +391,12 @@ def _print_augmentation_stats(train_ds, val_ds):
     print(f"    vertical flip          ~{count(p_vflip):>5} / {n_train}  ({p_vflip*100:.0f}%)")
     print(f"    rotation ±20°          ~{count(p_rotate):>5} / {n_train}  ({p_rotate*100:.0f}%)")
     print(f"    random crop/zoom       ~{count(p_crop):>5} / {n_train}  ({p_crop*100:.0f}%)")
-    print(f"    background vandalize   ~{count(p_bg):>5} / {n_train}  ({p_bg*100:.0f}%,  8–18 shapes + noise)")
-    print(f"    hand vandalize         ~{count(p_hand):>5} / {n_train}  ({p_hand*100:.0f}%,  6–14 shapes + noise)")
+    print(f"    ── bg/hand noise group ──────────────────────────────")
+    print(f"    clean (no bg/hand)     ~{count(p_clean_bg_hand):>5} / {n_train}  (50% — hard guarantee)")
+    print(f"    noisy group (gate)     ~{count(p_noisy_group):>5} / {n_train}  (50% enter, then split:)")
+    print(f"      background noise     ~{count(p_bg_hand):>5} / {n_train}  (25% of total)")
+    print(f"      hand noise           ~{count(p_bg_hand):>5} / {n_train}  (25% of total)")
+    print(f"    ─────────────────────────────────────────────────────")
     print(f"    nail texture/manicure  ~{count(p_texture):>5} / {n_train}  ({p_texture*100:.0f}%)")
     print(f"    global noise           ~{count(p_noise):>5} / {n_train}  ({p_noise*100:.0f}%)")
     print(f"    opaque shapes (α=1.0)  ~30% of every shape drawn")

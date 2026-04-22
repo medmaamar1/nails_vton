@@ -165,11 +165,17 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+def unwrap(model):
+    """Return base model regardless of DataParallel wrapping."""
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
+
+
 def main():
     args   = parse_args()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     use_amp = not args.no_amp and device.type == "cuda"
-    print(f"Device: {device}  |  AMP: {use_amp}")
+    n_gpus  = torch.cuda.device_count() if device.type == "cuda" else 0
+    print(f"Device: {device}  |  AMP: {use_amp}  |  GPUs: {max(n_gpus, 1)}")
 
     # ── Data ────────────────────────────────────────────────────────────────────
     train_loader, val_loader = make_loaders(
@@ -198,6 +204,12 @@ def main():
 
     base_lrs = [pg["lr"] for pg in optimizer.param_groups]
 
+    # ── Wrap with DataParallel AFTER building optimizer param groups ─────────────
+    if n_gpus > 1:
+        model = torch.nn.DataParallel(model)
+        print(f"DataParallel across {n_gpus} GPUs "
+              f"({args.batch_size // n_gpus} samples/GPU per step)")
+
     def set_lr(epoch):
         scale = get_lr_scale(epoch, args.warmup_epochs, args.epochs)
         for pg, base in zip(optimizer.param_groups, base_lrs):
@@ -216,7 +228,7 @@ def main():
         # Strip 'module.' prefix if saved from DataParallel
         if any(k.startswith("module.") for k in state_dict):
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        model.load_state_dict(state_dict)
+        unwrap(model).load_state_dict(state_dict)
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch       = ckpt["epoch"] + 1
         best_val_miou     = ckpt.get("best_val_miou", 0.0)
@@ -261,7 +273,7 @@ def main():
 
         ckpt_payload = {
             "epoch"            : epoch,
-            "model"            : model.state_dict(),
+            "model"            : unwrap(model).state_dict(),
             "optimizer"        : optimizer.state_dict(),
             "best_val_miou"    : best_val_miou,
             "epochs_no_improve": epochs_no_improve,
@@ -283,6 +295,9 @@ def main():
             if epochs_no_improve >= args.patience:
                 print(f"\nEarly stopping — no improvement for {args.patience} consecutive epochs.")
                 break
+
+        del ckpt_payload
+        gc.collect()
 
         with open(ckpt_dir / "history.json", "w") as f:
             json.dump(history, f, indent=2)
