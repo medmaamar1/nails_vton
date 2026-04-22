@@ -125,18 +125,17 @@ class NailVTONModel(nn.Module):
         self.gate       = PresenceGate(FUSE)
 
     def forward(self, x):
-        with torch.amp.autocast("cuda", enabled=torch.is_autocast_enabled()):
-            x_half                   = F.interpolate(x, scale_factor=0.5, mode="bilinear", align_corners=False)
-            feat_high                = self.encoder_high(x)
-            feat_low_s4, feat_low_s8 = self.encoder_low(x_half)
+        x_half                   = F.interpolate(x, scale_factor=0.5, mode="bilinear", align_corners=False)
+        feat_high                = self.encoder_high(x)
+        feat_low_s4, feat_low_s8 = self.encoder_low(x_half)
 
-            f0 = self.fusion_low(feat_low_s8, feat_low_s4)
-            f1 = self.fusion_high(f0, feat_high)
+        f0 = self.fusion_low(feat_low_s8, feat_low_s4)
+        f1 = self.fusion_high(f0, feat_high)
 
-            # Laplacian pyramid: intermediate logits at f0 resolution (H/16 of input)
-            logits_inter = self.head_inter(f0)   # (B, 2, H/16, W/16)
-            logits       = self.head(f1)          # (B, 2, H/8,  W/8)
-            gate         = self.gate(f1)          # (B, 1)
+        # Laplacian pyramid: intermediate logits at f0 resolution (H/16 of input)
+        logits_inter = self.head_inter(f0)   # (B, 2, H/16, W/16)
+        logits       = self.head(f1)          # (B, 2, H/8,  W/8)
+        gate         = self.gate(f1)          # (B, 1)
 
         out = F.interpolate(logits, size=(self.image_size, self.image_size),
                             mode="bilinear", align_corners=False)

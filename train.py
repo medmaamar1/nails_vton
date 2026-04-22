@@ -170,6 +170,25 @@ def main():
     args   = parse_args()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     use_amp = not args.no_amp and device.type == "cuda"
+
+    if device.type == "cuda":
+        major, minor = torch.cuda.get_device_capability(0)
+        # AMP kernels are unreliable on older architectures in some Kaggle images.
+        if major < 7:
+            use_amp = False
+            print(f"AMP disabled on CUDA capability {major}.{minor} (older GPU architecture).")
+
+        # Probe a tiny CUDA op up front to fail fast and avoid epoch-time crashes.
+        try:
+            probe = torch.randn(1, 3, 8, 8, device=device)
+            _ = torch.nn.functional.interpolate(probe, scale_factor=0.5, mode="bilinear", align_corners=False)
+            del probe
+        except Exception as e:
+            print(f"CUDA kernel probe failed: {e}")
+            print("Falling back to CPU to keep training running.")
+            device = torch.device("cpu")
+            use_amp = False
+
     print(f"Device: {device}  |  AMP: {use_amp}")
 
     # ── Data ────────────────────────────────────────────────────────────────────
