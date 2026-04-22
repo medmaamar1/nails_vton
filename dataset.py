@@ -157,10 +157,10 @@ class NailDataset(Dataset):
         # The other 50% enter the noisy group where bg and hand are each
         # applied independently — so within that group some get only bg,
         # some only hand, some both.
-        if random.random() > 0.5:
-            if random.random() > 0.5:
+        if random.random() > 0.4:
+            if random.random() > 0.35:
                 img = self._vandalize_background(img, msk)
-            if random.random() > 0.5:
+            if random.random() > 0.35:
                 img = self._vandalize_hand(img, msk)
 
         # Global Gaussian noise: simulate camera noise and low-quality images
@@ -168,6 +168,7 @@ class NailDataset(Dataset):
             img_np = np.array(img).astype(np.float32)
             noise  = np.random.normal(0, random.uniform(5, 20), img_np.shape)
             img    = Image.fromarray(np.clip(img_np + noise, 0, 255).astype(np.uint8))
+            del img_np, noise
 
         return img, msk
 
@@ -251,8 +252,8 @@ class NailDataset(Dataset):
         noise_strength = random.uniform(15, 45)
         noise = np.random.normal(0, noise_strength, img_np.shape)
         img_np = img_np + noise * (1.0 - np.expand_dims(msk_np, -1))
+        del noise
 
-        # Heavily increased number of patches/shapes to destroy background
         num_patches = random.randint(30, 60)
         for _ in range(num_patches):
             color  = np.random.randint(0, 256, (3,))
@@ -292,8 +293,11 @@ class NailDataset(Dataset):
 
             piece  = s_mask * bg_mask * a
             img_np = img_np * (1 - piece) + (color * piece)
+            del s_mask, piece
 
-        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
+        result = Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
+        del img_np, msk_np, bg_mask
+        return result
 
     def _vandalize_hand(self, img, msk):
         """Overlay shapes and noise on the hand/skin region to destroy texture cues."""
@@ -306,8 +310,8 @@ class NailDataset(Dataset):
         noise_strength = random.uniform(10, 35)
         noise = np.random.normal(0, noise_strength, img_np.shape)
         img_np = img_np + noise * hand_mask
+        del noise
 
-        # Heavily increased number of patches/shapes to destroy hand texture
         num_patches = random.randint(20, 40)
         for _ in range(num_patches):
             color  = np.random.randint(0, 256, (3,))
@@ -354,8 +358,11 @@ class NailDataset(Dataset):
 
             piece  = s_mask * hand_mask * a
             img_np = img_np * (1 - piece) + (color * piece)
+            del s_mask, piece
 
-        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
+        result = Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
+        del img_np, msk_np, hand_mask
+        return result
 
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
