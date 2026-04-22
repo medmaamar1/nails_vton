@@ -72,33 +72,36 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             torch.cuda.empty_cache()
 
         try:
-            img_cpu, tgt_cpu = next(loader_iter)
+            batch = next(loader_iter)
         except StopIteration:
             break
 
-        image  = img_cpu.to(device, non_blocking=True)
-        target = tgt_cpu.to(device, non_blocking=True)
-        del img_cpu, tgt_cpu
+        # Minimal GPU transfer
+        image  = batch[0].to(device, non_blocking=True)  # (B, 3, H, W)
+        target = batch[1].to(device, non_blocking=True)   # (B, 1, H, W)
+        batch  = None  # Kill CPU tensor immediately
 
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast("cuda", enabled=use_amp):
-            out = model(image)  # Tuple: (logits, logits_inter, gate)
-            loss_val = criterion(out, target)
+        def run_step(img, tgt):
+            with autocast("cuda", enabled=use_amp):
+                out1, out2, gate_out = model(img)
+                loss_val = criterion((out1, out2, gate_out), tgt)
 
-        if use_amp:
-            scaler.scale(loss_val).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss_val.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
+            if use_amp:
+                scaler.scale(loss_val).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss_val.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                optimizer.step()
 
-        cur_loss = loss_val.item()
-        cur_miou = compute_miou(out[0].detach(), target)
+            return loss_val.item(), compute_miou(out1.detach(), tgt)
+
+        cur_loss, cur_miou = run_step(image, target)
 
         total_loss += cur_loss
         total_miou += cur_miou
@@ -108,10 +111,12 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             print(f"  step {i+1:04d}/{n_batches} | loss={cur_loss:.4f}  miou={cur_miou:.4f} | RAM={mem:.1f}GB")
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-            gc.collect()
+            gc.collect(2)
 
-        # Aggressively break references
-        del image, target, out, loss_val
+        # Cleanup
+        image  = None
+        target = None
+        del image, target
 
         if limit is not None and i + 1 >= limit:
             break
@@ -131,27 +136,28 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
 
     for i in range(n_batches):
         try:
-            img_cpu, tgt_cpu = next(loader_iter)
+            batch = next(loader_iter)
         except StopIteration:
             break
 
-        image  = img_cpu.to(device, non_blocking=True)
-        target = tgt_cpu.to(device, non_blocking=True)
-        del img_cpu, tgt_cpu
+        image  = batch[0].to(device, non_blocking=True)
+        target = batch[1].to(device, non_blocking=True)
+        batch  = None
 
-        # P100 doesn't support the cache_enabled=False flag or Turing-specific kernels
-        with autocast("cuda", enabled=use_amp):
-            out = model(image)
-            loss_val = criterion(out, target)
+        def run_val_step(img, tgt):
+            with autocast("cuda", enabled=use_amp):
+                out1, out2, gate_out = model(img)
+                loss_val = criterion((out1, out2, gate_out), tgt)
+            return loss_val.item(), compute_miou(out1.detach(), tgt)
 
-        cur_loss = loss_val.item()
-        cur_miou = compute_miou(out[0].detach(), target)
-        
+        cur_loss, cur_miou = run_val_step(image, target)
         total_loss += cur_loss
         total_miou += cur_miou
 
-        # Aggressively break references
-        del image, target, out, loss_val
+        # Cleanup
+        image  = None
+        target = None
+        del image, target
 
     if n_batches == 0:
         return 0.0, 0.0
@@ -178,7 +184,7 @@ def main():
     model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
     model.count_parameters()
 
-    # DataParallel removed for P100 stability and to prevent CPU RAM leaks
+    # DataParallel removed for P100 stability
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = BinarySegLoss().to(device)
