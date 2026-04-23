@@ -47,6 +47,7 @@ def parse_args():
     p.add_argument("--limit_train_batches",type=int,   default=None)
     p.add_argument("--limit_val_batches",  type=int,   default=None)
     p.add_argument("--hard_neg_prob",      type=float, default=0.2)
+    p.add_argument("--history_json",       default=None)
     return p.parse_args()
 
 
@@ -270,6 +271,12 @@ def main():
         history           = ckpt.get("history", [])
         if is_main_process:
             print(f"Resumed from epoch {start_epoch}  (best mIoU={best_val_miou:.4f}, no-improve streak={epochs_no_improve})")
+
+    if args.history_json and Path(args.history_json).exists():
+        with open(args.history_json, "r") as f:
+            history = json.load(f)
+        if is_main_process:
+            print(f"Loaded training history from {args.history_json} ({len(history)} epochs)")
 
     ckpt_dir = Path(args.ckpt_dir)
     if is_main_process:
