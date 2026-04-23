@@ -35,83 +35,6 @@ DATA_ROOT  = "/kaggle/input/datasets/muhammadhammad261/nail-segmentation-dataset
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def dilate_mask(msk_t, px=8):
-    """Expand the nail mask by `px` pixels so we get a safety buffer."""
-    m = msk_t.unsqueeze(0)  # (1, 1, H, W)
-    m = F.max_pool2d(m, kernel_size=px * 2 + 1, stride=1, padding=px)
-    return m.squeeze(0)  # (1, H, W)
-
-
-def generate_hard_negatives(img_t, msk_t,
-                             crop_size=224,
-                             n_crops=4,
-                             safety_margin_px=12,
-                             min_flesh_ratio=0.6):
-    """
-    Randomly samples square crops from the image that contain
-    ZERO nail pixels (with a safety buffer around the nail mask).
-    """
-    _, H, W = img_t.shape
-
-    # Dilate the nail mask to create a forbidden zone
-    forbidden = dilate_mask(msk_t, px=safety_margin_px)[0]  # (H, W), 0/1
-
-    # Pre-compute integral image for fast O(1) window sums
-    nail_integral = forbidden.cumsum(0).cumsum(1)  # (H, W)
-
-    def window_nail_count(y, x):
-        """Sum of nail pixels in [y:y+crop_size, x:x+crop_size]."""
-        y2, x2 = y + crop_size - 1, x + crop_size - 1
-        if y2 >= H or x2 >= W:
-            return float('inf')
-        total = nail_integral[y2, x2]
-        if y > 0:
-            total = total - nail_integral[y - 1, x2]
-        if x > 0:
-            total = total - nail_integral[y2, x - 1]
-        if y > 0 and x > 0:
-            total = total + nail_integral[y - 1, x - 1]
-        return total.item()
-
-    # Sample candidate positions
-    valid_corners = []
-    n_candidates = min(2000, (H - crop_size + 1) * (W - crop_size + 1))
-    for _ in range(n_candidates):
-        y = random.randint(0, H - crop_size)
-        x = random.randint(0, W - crop_size)
-        if window_nail_count(y, x) == 0:
-            valid_corners.append((y, x))
-
-    if not valid_corners:
-        return []
-
-    # Deduplicate loosely
-    random.shuffle(valid_corners)
-    chosen = []
-    min_dist = crop_size // 4
-    for (y, x) in valid_corners:
-        too_close = any(
-            abs(y - cy) < min_dist and abs(x - cx) < min_dist
-            for cy, cx in chosen
-        )
-        if not too_close:
-            chosen.append((y, x))
-        if len(chosen) >= n_crops:
-            break
-
-    results = []
-    zero_mask = torch.zeros(1, crop_size, crop_size)
-
-    for (y, x) in chosen:
-        crop = img_t[:, y:y + crop_size, x:x + crop_size]
-        # Reject crops that are mostly black/padding (std proxy)
-        if crop.std().item() < 0.05:
-            continue
-        results.append((crop, zero_mask))
-
-    return results
-
-
 # ── Dataset ────────────────────────────────────────────────────────────────────
 
 class NailDataset(Dataset):
@@ -119,11 +42,10 @@ class NailDataset(Dataset):
     Memory-safe image/mask pair loader.
     Stores only path strings in RAM — zero PIL or tensor caching.
     """
-    def __init__(self, base_path, split="train", augment=False, image_size=IMAGE_SIZE, hard_negative_prob=0.0):
+    def __init__(self, base_path, split="train", augment=False, image_size=IMAGE_SIZE):
         self.base_path  = Path(base_path)
         self.augment    = augment
         self.image_size = image_size
-        self.hard_negative_prob = hard_negative_prob
 
         csv_path = self.base_path / "NailSegmentationV1.csv"
         df = pd.read_csv(csv_path)
@@ -188,17 +110,6 @@ class NailDataset(Dataset):
         # ── Explicit cleanup ──────────────────────────────────────────────────
         img.close()
         msk.close()
-
-        # ── Hard Negative Generation ──────────────────────────────────────────
-        if self.augment and self.hard_negative_prob > 0 and random.random() < self.hard_negative_prob:
-            # Try to extract a hard negative crop from the current image
-            crops = generate_hard_negatives(img_t, msk_t, crop_size=self.image_size // 2, n_crops=1)
-            if crops:
-                neg_img, neg_msk = crops[0]
-                # Resize to target size (simulates zoom)
-                neg_img = F.interpolate(neg_img.unsqueeze(0), size=(self.image_size, self.image_size), mode="bilinear", align_corners=False).squeeze(0)
-                neg_msk = F.interpolate(neg_msk.unsqueeze(0), size=(self.image_size, self.image_size), mode="nearest").squeeze(0)
-                return neg_img, neg_msk
 
         return img_t.clone(), msk_t.clone()
 
@@ -499,8 +410,8 @@ def _print_augmentation_stats(train_ds, val_ds):
 
 
 def make_loaders(base_path, batch_size=16, num_workers=2, image_size=IMAGE_SIZE,
-                 distributed=False, rank=0, world_size=1, hard_negative_prob=0.0):
-    train_ds = NailDataset(base_path, split="train", augment=True,  image_size=image_size, hard_negative_prob=hard_negative_prob)
+                 distributed=False, rank=0, world_size=1):
+    train_ds = NailDataset(base_path, split="train", augment=True,  image_size=image_size)
     val_ds   = NailDataset(base_path, split="val",   augment=False, image_size=image_size)
 
     _print_augmentation_stats(train_ds, val_ds)
