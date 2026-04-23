@@ -46,6 +46,7 @@ def parse_args():
     p.add_argument("--warmup_epochs",      type=int,   default=10) # Longer warmup for stability
     p.add_argument("--limit_train_batches",type=int,   default=None)
     p.add_argument("--limit_val_batches",  type=int,   default=None)
+    p.add_argument("--hard_neg_prob",      type=float, default=0.2)
     return p.parse_args()
 
 
@@ -217,6 +218,7 @@ def main():
         distributed  = distributed,
         rank         = local_rank,
         world_size   = world_size,
+        hard_negative_prob = args.hard_neg_prob,
     )
 
     # ── Model ───────────────────────────────────────────────────────────────────
