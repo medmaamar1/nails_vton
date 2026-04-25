@@ -1,59 +1,61 @@
 """
 Nail VTON Loss Functions
 ------------------------
-Single-task binary segmentation only. Direction loss removed.
+Binary segmentation only. Works with DeepLabV3+ output.
+
+Input convention (all losses):
+  logits  : (B, 1, H, W)  raw logits from DeepLabV3+
+  targets : (B, 1, H, W)  float32 binary {0.0, 1.0}
 
 Active losses:
-  LMPLoss        — Loss Max-Pooling: mean over top-10% hardest pixels (paper §3.3, +2% mIoU)
-  TverskyLoss    — Very heavily penalizes False Positives (alpha=0.15, beta=0.85)
+  LMPLoss        — Loss Max-Pooling: mean over top-10% hardest pixels
+  TverskyLoss    — Heavily penalizes False Positives (alpha=0.15, beta=0.85)
   SoftDiceLoss   — Penalises holes and patchy masks
   SobelEdgeLoss  — Forces sharp, precise cuticle boundaries
-  PresenceGate   — BCE on global nail-presence gate
-  BinarySegLoss  — Main: 30% LMP + 15% Tversky + 25% Dice + 30% Edge
-                   + 40% weight * LMP on intermediate (Laplacian pyramid, paper §3.2)
-                   + 30% Gate BCE
+  BinarySegLoss  — 30% LMP + 15% Tversky + 25% Dice + 30% Edge
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ── Loss Max-Pooling (paper §3.3) ─────────────────────────────────────────────
+# ── Loss Max-Pooling ───────────────────────────────────────────────────────────
 
 class LMPLoss(nn.Module):
-    """Loss Max-Pooling: sort all pixels in the minibatch by cross-entropy loss,
-    take the mean of the top-p fraction (default p=0.1 = hardest 10%).
-    Paper reports +2% mIoU vs class-weighted baseline for nail segmentation."""
-    def __init__(self, p=0.1):
+    """
+    Loss Max-Pooling: mean over the top-p fraction of hardest pixels.
+    Uses binary cross-entropy per pixel (model outputs 1 logit per pixel).
+    Paper reports +2% mIoU vs class-weighted baseline for nail segmentation.
+    """
+    def __init__(self, p: float = 0.1):
         super().__init__()
         self.p = p
 
-    def forward(self, logits, targets):
-        # Per-pixel cross-entropy, no reduction
-        target_long = targets.squeeze(1).long()                       # (B, H, W)
-        loss_map    = F.cross_entropy(logits, target_long, reduction="none")  # (B, H, W)
-
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # Per-pixel BCE, no reduction — shape: (B, 1, H, W)
+        loss_map  = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         loss_flat = loss_map.view(-1)
         n_keep    = max(1, int(self.p * loss_flat.numel()))
         top_loss, _ = torch.topk(loss_flat, n_keep)
         return top_loss.mean()
 
 
-# ── Tversky Loss (The Ghost-Buster) ─────────────────────────────────────────────
+# ── Tversky Loss ───────────────────────────────────────────────────────────────
 
 class TverskyLoss(nn.Module):
     """
-    A generalization of Dice loss.
-    alpha=0.15, beta=0.85 -> Very heavily penalizes False Positives (Ghost Nails).
+    A generalisation of Dice loss.
+    alpha=0.15, beta=0.85 → very heavily penalizes False Positives (Ghost Nails).
     """
-    def __init__(self, alpha=0.15, beta=0.85, eps=1e-6):
+    def __init__(self, alpha: float = 0.15, beta: float = 0.85, eps: float = 1e-6):
         super().__init__()
         self.alpha = alpha
         self.beta  = beta
         self.eps   = eps
 
-    def forward(self, logits, targets):
-        probs = torch.softmax(logits, dim=1)[:, 1]  # (B, H, W)
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs  = torch.sigmoid(logits).squeeze(1)   # (B, H, W)
         target = targets.squeeze(1).float()          # (B, H, W)
 
         tp = (probs * target).sum(dim=(-2, -1))
@@ -68,12 +70,14 @@ class TverskyLoss(nn.Module):
 
 class SoftDiceLoss(nn.Module):
     """Treats the nail as ONE connected object. Punishes holes and patches."""
-    def forward(self, logits, targets, eps=1e-6):
-        prob_fg = torch.softmax(logits, dim=1)[:, 1]   # (B, H, W)
-        target  = targets.squeeze(1).float()             # (B, H, W)
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor,
+                eps: float = 1e-6) -> torch.Tensor:
+        prob_fg = torch.sigmoid(logits).squeeze(1)   # (B, H, W)
+        target  = targets.squeeze(1).float()          # (B, H, W)
+
         intersection = (prob_fg * target).sum(dim=(-2, -1))
         cardinality  = prob_fg.sum(dim=(-2, -1)) + target.sum(dim=(-2, -1))
-        dice         = (2. * intersection + eps) / (cardinality + eps)
+        dice         = (2.0 * intersection + eps) / (cardinality + eps)
         return 1.0 - dice.mean()
 
 
@@ -81,7 +85,7 @@ class SoftDiceLoss(nn.Module):
 
 class SobelEdgeLoss(nn.Module):
     """
-    Penalises blurry or mis-aligned nail boundaries.
+    Penalises blurry or misaligned nail boundaries.
     Computes MSE between the Sobel edge maps of prediction and ground truth.
     """
     def __init__(self):
@@ -95,14 +99,14 @@ class SobelEdgeLoss(nn.Module):
         self.register_buffer("kx", kx)
         self.register_buffer("ky", ky)
 
-    def _edges(self, x):
-        # x: (B, 1, H, W)
+    def _edges(self, x: torch.Tensor) -> torch.Tensor:
+        # x : (B, 1, H, W)
         gx = F.conv2d(x, self.kx, padding=1)
         gy = F.conv2d(x, self.ky, padding=1)
-        return torch.sqrt(gx**2 + gy**2 + 1e-6)
+        return torch.sqrt(gx ** 2 + gy ** 2 + 1e-6)
 
-    def forward(self, logits, targets):
-        prob_fg    = torch.softmax(logits, dim=1)[:, 1:2]  # (B, 1, H, W)
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        prob_fg    = torch.sigmoid(logits)        # (B, 1, H, W)
         pred_edges = self._edges(prob_fg)
         true_edges = self._edges(targets.float())
         return F.mse_loss(pred_edges, true_edges)
@@ -112,84 +116,61 @@ class SobelEdgeLoss(nn.Module):
 
 class BinarySegLoss(nn.Module):
     """
-    Main output (full-res):
-      30% LMP     — hardest-pixel cross-entropy (paper §3.3)
-      15% Tversky — FP suppression
-      25% Dice    — mask connectivity
+    Main training loss for DeepLabV3+ binary nail segmentation.
+
+    Weights:
+      30% LMP     — hardest-pixel BCE (top-10% loss pixels)
+      15% Tversky — FP suppression (ghost nail prevention)
+      25% Dice    — mask connectivity and completeness
       30% Edge    — sharp cuticle boundaries
 
-    Intermediate output (Laplacian pyramid, paper §3.2):
-      40% weight × LMP at f0 resolution — forces low-res features to be meaningful
-
-    Gate: 30% weight × BCE on presence prediction
+    Args:
+        logits  : (B, 1, H, W) raw logits from model
+        targets : (B, 1, H, W) float32 binary {0, 1}
+    Returns:
+        Scalar loss tensor.
     """
-    def __init__(self, alpha=0.15, beta=0.85, inter_weight=0.4, gate_weight=0.3):
+    def __init__(self, alpha: float = 0.15, beta: float = 0.85):
         super().__init__()
-        self.lmp         = LMPLoss(p=0.1)
-        self.tversky     = TverskyLoss(alpha=alpha, beta=beta)
-        self.dice        = SoftDiceLoss()
-        self.edge        = SobelEdgeLoss()
-        self.inter_weight = inter_weight
-        self.gate_weight  = gate_weight
+        self.lmp     = LMPLoss(p=0.1)
+        self.tversky = TverskyLoss(alpha=alpha, beta=beta)
+        self.dice    = SoftDiceLoss()
+        self.edge    = SobelEdgeLoss()
 
-    def forward(self, output, targets):
-        # output  : (logits, logits_inter, gate)
-        #   logits       : (B, 2, H, W)       — full-resolution output
-        #   logits_inter : (B, 2, H/16, W/16) — intermediate Laplacian level
-        #   gate         : (B, 1)             — presence probability
-        # targets : (B, 1, H, W) float32
-        logits, logits_inter, gate = output
-
-        # ── Main segmentation loss ────────────────────────────────────────────
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         l_lmp     = self.lmp(logits, targets)
         l_tversky = self.tversky(logits, targets)
         l_dice    = self.dice(logits, targets)
         l_edge    = self.edge(logits, targets)
-        loss      = 0.30 * l_lmp + 0.15 * l_tversky + 0.25 * l_dice + 0.30 * l_edge
-
-        # ── Intermediate (Laplacian pyramid) supervision ──────────────────────
-        # Downsample GT to match f0 spatial size, apply LMP at that scale
-        inter_h, inter_w = logits_inter.shape[2:]
-        targets_ds = F.interpolate(targets, size=(inter_h, inter_w), mode="nearest")
-        l_inter    = self.lmp(logits_inter, targets_ds)
-        loss       = loss + self.inter_weight * l_inter
-
-        # ── Gate BCE ──────────────────────────────────────────────────────────
-        # gate is raw logits — use with_logits which is AMP-safe
-        has_nail = (targets.sum(dim=(-1, -2, -3)) > 0).float()  # (B,)
-        l_gate   = F.binary_cross_entropy_with_logits(gate.squeeze(1), has_nail)
-        loss     = loss + self.gate_weight * l_gate
-
-        # ── Background-Only Penalty ───────────────────────────────────────────
-        with torch.no_grad():
-            is_empty_batch = targets.sum() == 0
-        if is_empty_batch:
-            loss = loss * 4.0
-
-        return loss
+        return 0.30 * l_lmp + 0.15 * l_tversky + 0.25 * l_dice + 0.30 * l_edge
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
-def compute_miou(logits, targets, threshold=0.5, eps=1e-6):
+def compute_miou(logits: torch.Tensor, targets: torch.Tensor,
+                 threshold: float = 0.5, eps: float = 1e-6) -> float:
     """
-    mIoU for binary segmentation.
-    logits : (B, 2, H, W)
-    targets: (B, 1, H, W) float32 {0,1}
+    Mean IoU for binary segmentation.
+
+    Args:
+        logits  : (B, 1, H, W) raw logits
+        targets : (B, 1, H, W) float32 {0, 1}
+    Returns:
+        Scalar mean IoU (foreground + background averaged).
     """
-    prob_fg     = torch.softmax(logits, dim=1)[:, 1:2]
+    prob_fg     = torch.sigmoid(logits)
     pred_binary = (prob_fg > threshold).float()
 
     # Foreground IoU
-    i_fg  = (pred_binary * targets).sum(dim=(-2, -1))
-    u_fg  = (pred_binary + targets).clamp(0, 1).sum(dim=(-2, -1))
+    i_fg   = (pred_binary * targets).sum(dim=(-2, -1))
+    u_fg   = (pred_binary + targets).clamp(0, 1).sum(dim=(-2, -1))
     iou_fg = (i_fg + eps) / (u_fg + eps)
 
     # Background IoU
-    pred_bg   = 1.0 - pred_binary
-    tgt_bg    = 1.0 - targets
-    i_bg  = (pred_bg * tgt_bg).sum(dim=(-2, -1))
-    u_bg  = (pred_bg + tgt_bg).clamp(0, 1).sum(dim=(-2, -1))
-    iou_bg = (i_bg + eps) / (u_bg + eps)
+    pred_bg = 1.0 - pred_binary
+    tgt_bg  = 1.0 - targets
+    i_bg    = (pred_bg * tgt_bg).sum(dim=(-2, -1))
+    u_bg    = (pred_bg + tgt_bg).clamp(0, 1).sum(dim=(-2, -1))
+    iou_bg  = (i_bg + eps) / (u_bg + eps)
 
     return ((iou_fg + iou_bg) / 2.0).mean().item()

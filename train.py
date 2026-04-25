@@ -5,7 +5,7 @@ Usage:
     python train.py --epochs 200 --batch_size 16
 
 Dataset: NailSegmentationDatasetV2 (CSV-based, pre-split).
-Model  : NailVTONModel — binary segmentation only.
+Model  : DeepLabV3+ ResNet-101 (segmentation_models_pytorch) — binary segmentation.
 """
 
 import gc
@@ -25,25 +25,25 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 sys.path.insert(0, str(Path(__file__).parent))
 from dataset import make_loaders, DATA_ROOT
-from model   import NailVTONModel
+from model   import build_model, count_parameters
 from losses  import BinarySegLoss, compute_miou
 
 
 # ── Args ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser("Nail VTON Training")
+    p = argparse.ArgumentParser("Nail VTON Training — DeepLabV3+ ResNet-101")
     p.add_argument("--data_root",          default=DATA_ROOT)
     p.add_argument("--epochs",             type=int,   default=200)
     p.add_argument("--patience",           type=int,   default=20)
     p.add_argument("--batch_size",         type=int,   default=16)
-    p.add_argument("--lr",                 type=float, default=5e-4) # Fine-Tuning LR
-    p.add_argument("--image_size",         type=int,   default=448)
+    p.add_argument("--lr",                 type=float, default=1e-4)  # ResNet-101 fine-tune LR
+    p.add_argument("--image_size",         type=int,   default=640)
     p.add_argument("--num_workers",        type=int,   default=2)
     p.add_argument("--ckpt_dir",           default="checkpoints")
     p.add_argument("--resume",             default=None)
     p.add_argument("--no_amp",             action="store_true")
-    p.add_argument("--warmup_epochs",      type=int,   default=10) # Longer warmup for stability
+    p.add_argument("--warmup_epochs",      type=int,   default=10)
     p.add_argument("--limit_train_batches",type=int,   default=None)
     p.add_argument("--limit_val_batches",  type=int,   default=None)
     return p.parse_args()
@@ -107,7 +107,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
         optimizer.zero_grad(set_to_none=True)
 
         with autocast("cuda", enabled=use_amp, cache_enabled=False):
-            out = model(image)  # Tuple: (logits, logits_inter, gate)
+            out      = model(image)          # (B, 1, H, W) raw logits
             loss_val = criterion(out, target)
 
         if use_amp:
@@ -122,7 +122,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, use_amp
             optimizer.step()
 
         cur_loss = loss_val.item()
-        cur_miou = compute_miou(out[0].detach(), target)
+        cur_miou = compute_miou(out.detach(), target)
 
         total_loss += cur_loss
         total_miou += cur_miou
@@ -166,11 +166,11 @@ def validate(model, loader, criterion, device, use_amp, limit=None):
         del img_cpu, tgt_cpu
 
         with autocast("cuda", enabled=use_amp, cache_enabled=False):
-            out = model(image)
+            out      = model(image)          # (B, 1, H, W) raw logits
             loss_val = criterion(out, target)
 
         cur_loss = loss_val.item()
-        cur_miou = compute_miou(out[0].detach(), target)
+        cur_miou = compute_miou(out.detach(), target)
         
         total_loss += cur_loss
         total_miou += cur_miou
@@ -220,20 +220,22 @@ def main():
     )
 
     # ── Model ───────────────────────────────────────────────────────────────────
-    model = NailVTONModel(image_size=args.image_size, pretrained=True).to(device)
+    model = build_model(image_size=args.image_size).to(device)
     if is_main_process:
-        model.count_parameters()
+        count_parameters(model)
     if distributed:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     # ── Loss ───────────────────────────────────────────────────────────────────
     criterion = BinarySegLoss().to(device)
 
-    # ── Optimizer (encoder 10× lower LR) ───────────────────────────────────────
-    base_model = model.module if hasattr(model, "module") else model
-    encoder_params = list(base_model.encoder_low.parameters()) + list(base_model.encoder_high.parameters())
-    encoder_ids    = {id(p) for p in encoder_params}
-    decoder_params = [p for p in base_model.parameters() if id(p) not in encoder_ids]
+    # ── Optimizer (encoder 10× lower LR — standard fine-tuning strategy) ────────
+    base_model     = model.module if hasattr(model, "module") else model
+    encoder_params = list(base_model.encoder.parameters())
+    decoder_params = [
+        p for p in base_model.parameters()
+        if id(p) not in {id(q) for q in encoder_params}
+    ]
 
     optimizer = optim.AdamW([
         {"params": encoder_params, "lr": args.lr * 0.1},

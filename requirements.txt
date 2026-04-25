@@ -1,0 +1,20 @@
+# Core training dependencies
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Strong Model backbone
+segmentation-models-pytorch>=0.3.3
+timm>=0.9.0                        # SMP dependency for encoder weights
+
+# Data
+pandas>=2.0.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# Training utilities
+psutil>=5.9.0
+
+# Optional: MediaPipe (finger mapping scripts only — not needed for training)
+# mediapipe>=0.10.0
+# scipy>=1.11.0
+# opencv-python>=4.8.0

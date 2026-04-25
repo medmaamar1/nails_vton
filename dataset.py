@@ -8,8 +8,11 @@ Structure:
   base_path/NailSegmentationV1.csv
 
 Returns per-sample tuple:
-  (image_tensor: (3,H,W) float32 normalised grayscale,
+  (image_tensor: (3,H,W) float32 normalised,
    mask_tensor:  (1,H,W) float32 binary {0,1})
+
+Training resolution: 640×640 (native Kaggle dataset size).
+Inference resolution: any — DeepLabV3+ is fully convolutional.
 """
 
 import gc
@@ -27,7 +30,7 @@ from PIL import Image, ImageOps
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-IMAGE_SIZE = 448
+IMAGE_SIZE = 640
 MEAN       = [0.485, 0.456, 0.406]
 STD        = [0.229, 0.224, 0.225]
 DATA_ROOT  = "/kaggle/input/datasets/muhammadhammad261/nail-segmentation-dataset/NailSegmentationDatasetV2"
