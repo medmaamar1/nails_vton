@@ -50,6 +50,10 @@ class NailDataset(Dataset):
         self.augment    = augment
         self.image_size = image_size
 
+        # Fix: If user passed the /train or /val subfolder, move to root to find CSV
+        if self.base_path.name in ["train", "val", "valid", "test"]:
+            self.base_path = self.base_path.parent
+
         csv_path = self.base_path / "NailSegmentationV1.csv"
         df = pd.read_csv(csv_path)
         df['split'] = df['split'].str.strip().str.lower()
