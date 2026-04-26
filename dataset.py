@@ -159,26 +159,6 @@ class NailDataset(Dataset):
             kernel = random.choice([3, 5])
             img = TF.gaussian_blur(img, kernel_size=(kernel, kernel))
 
-        # Texture-Invariance: Vandalize the nail area with noise/patterns
-        # 50% Sane (Clean) / 50% Randomized (Vandalized)
-        if random.random() > 0.5:
-            img = self._vandalize_texture(img, msk)
-
-        # 50% Sane, 50% Noisy Hands/Background
-        if random.random() > 0.5:
-            # When we do apply noise, 50% chance they BOTH get noisy (overlap)
-            # 50% chance only ONE gets noisy (either Background OR Hand)
-            is_overlap = (random.random() > 0.5)
-
-            if is_overlap:
-                img = self._vandalize_background(img, msk)
-                img = self._vandalize_hand(img, msk)
-            else:
-                if random.random() > 0.5:
-                    img = self._vandalize_background(img, msk)
-                else:
-                    img = self._vandalize_hand(img, msk)
-
         # Global Gaussian noise: simulate camera noise and low-quality images
         if random.random() > 0.75:
             img_np = np.array(img).astype(np.float32)
@@ -186,194 +166,6 @@ class NailDataset(Dataset):
             img    = Image.fromarray(np.clip(img_np + noise, 0, 255).astype(np.uint8))
 
         return img, msk
-
-    def _vandalize_texture(self, img, msk):
-        """
-        Sequential Layered Manicure Engine.
-        Step 1: Paint Base Coat. 
-        Step 2: Paint Art (on top of Base Coat).
-        """
-        img_np = np.array(img).astype(np.float32)
-        msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
-        h, w, _ = img_np.shape
-        mask_3d = np.expand_dims(msk_np, axis=-1)
-        
-        # ── Step 1: Base Coat (80% chance) ───────────────────────────────────
-        if random.random() > 0.2:
-            color = np.random.randint(0, 256, (3,))
-            a = random.uniform(0.4, 0.9)
-            if random.random() > 0.4: # Solid
-                img_np = img_np * (1 - mask_3d * a) + (color * mask_3d * a)
-            else: # Gradient
-                grad = np.linspace(0, 1, h).reshape(h, 1, 1)
-                img_np = img_np * (1 - mask_3d * a * grad) + (color * mask_3d * a * grad)
-
-        # ── Step 2: Subtle Art Overlays (Glitter, Dots, Rects, Stripes) ──
-        if random.random() > 0.4:
-            num_designs = random.randint(2, 5) # Toned down from 15
-            for _ in range(num_designs):
-                dtype = random.choice(["rect", "star", "stripe", "circle"])
-                color = np.random.randint(0, 256, (3,))
-                a     = random.uniform(0.3, 0.6) # Toned down from 0.95
-                
-                s_mask = np.zeros((h, w, 1))
-                
-                if dtype == "rect":
-                    rw, rh = random.randint(5, 15), random.randint(5, 15) # Smaller
-                    ry, rx = random.randint(0, h-rh), random.randint(0, w-rw)
-                    s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
-                
-                elif dtype == "circle":
-                    radius = random.randint(3, 8)
-                    ry, rx = random.randint(0, h), random.randint(0, w)
-                    yy, xx = np.ogrid[:h, :w]
-                    dist = (yy - ry)**2 + (xx - rx)**2
-                    s_mask = (dist <= radius**2).astype(float)
-                    s_mask = np.expand_dims(s_mask, -1)
-                
-                elif dtype == "stripe":
-                    angle = random.uniform(0, np.pi)
-                    cos_a, sin_a = np.cos(angle), np.sin(angle)
-                    thick = random.randint(2, 4)
-                    yy, xx = np.ogrid[:h, :w]
-                    proj = xx * cos_a + yy * sin_a
-                    s_mask = (np.abs(proj - random.randint(0, h+w)) < thick).astype(float)
-                    s_mask = np.expand_dims(s_mask, -1)
-
-                elif dtype == "star":
-                    ry, rx = random.randint(5, h-5), random.randint(5, w-5)
-                    size = random.randint(5, 10)
-                    s_mask[ry-size:ry+size, rx-1:rx+1, :] = 1.0
-                    s_mask[ry-1:ry+1, rx-size:rx+size, :] = 1.0
-
-                # Bake ON TOP
-                final_piece_mask = s_mask * mask_3d * a
-                img_np = img_np * (1 - final_piece_mask) + (color * final_piece_mask)
-
-        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
-
-    def _pick_alpha(self):
-        """Mostly semi-transparent to keep anatomy visible."""
-        if random.random() < 0.20: # Reduced from 70%
-            return 1.0
-        return random.uniform(0.2, 0.6) # Toned down from 0.9
-
-    def _vandalize_background(self, img, msk):
-        """Paint random shapes, lines, and noise onto the background."""
-        img_np  = np.array(img).astype(np.float32)
-        msk_np  = np.array(msk).astype(np.float32) / 255.0
-        h, w, _ = img_np.shape
-        bg_mask = np.expand_dims(1.0 - msk_np, axis=-1)
-
-        # Dense Gaussian noise over the entire background
-        noise_strength = random.uniform(15, 45)
-        noise = np.random.normal(0, noise_strength, img_np.shape)
-        img_np = img_np + noise * (1.0 - np.expand_dims(msk_np, -1))
-
-        # Toned down number of patches
-        num_patches = random.randint(8, 18)
-        for _ in range(num_patches):
-            color  = np.random.randint(0, 256, (3,))
-            a      = self._pick_alpha()
-            dtype  = random.choice(["rect", "circle", "line", "cross", "filled_rect"])
-            s_mask = np.zeros((h, w, 1))
-
-            if dtype in ("rect", "filled_rect"):
-                rw, rh = random.randint(20, 100), random.randint(20, 100)
-                ry     = random.randint(0, max(1, h - rh))
-                rx     = random.randint(0, max(1, w - rw))
-                s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
-
-            elif dtype == "circle":
-                radius = random.randint(15, 60)
-                ry, rx = random.randint(0, h), random.randint(0, w)
-                yy, xx = np.ogrid[:h, :w]
-                s_mask = ((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
-
-            elif dtype == "line":
-                angle  = random.uniform(0, np.pi)
-                thick  = random.randint(4, 16)
-                cos_a, sin_a = np.cos(angle), np.sin(angle)
-                yy, xx = np.ogrid[:h, :w]
-                proj   = xx * cos_a + yy * sin_a
-                offset = random.randint(0, h + w)
-                s_mask = (np.abs(proj - offset) < thick).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
-
-            elif dtype == "cross":
-                cy, cx = random.randint(0, h), random.randint(0, w)
-                arm    = random.randint(15, 50)
-                thick  = random.randint(4, 12)
-                s_mask[max(0,cy-thick):min(h,cy+thick), max(0,cx-arm):min(w,cx+arm), :] = 1.0
-                s_mask[max(0,cy-arm):min(h,cy+arm), max(0,cx-thick):min(w,cx+thick), :] = 1.0
-
-            piece  = s_mask * bg_mask * a
-            img_np = img_np * (1 - piece) + (color * piece)
-
-        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
-
-    def _vandalize_hand(self, img, msk):
-        """Overlay shapes and noise on the hand/skin region to destroy texture cues."""
-        img_np  = np.array(img).astype(np.float32)
-        msk_np  = np.array(msk).astype(np.float32) / 255.0
-        h, w, _ = img_np.shape
-        hand_mask = np.expand_dims(1.0 - msk_np, axis=-1)
-
-        # Gaussian noise scoped to the hand area
-        noise_strength = random.uniform(10, 35)
-        noise = np.random.normal(0, noise_strength, img_np.shape)
-        img_np = img_np + noise * hand_mask
-
-        # Toned down number of patches
-        num_patches = random.randint(6, 12)
-        for _ in range(num_patches):
-            color  = np.random.randint(0, 256, (3,))
-            a      = self._pick_alpha()
-            dtype  = random.choice(["rect", "circle", "line", "stripe_thin", "filled_rect"])
-            s_mask = np.zeros((h, w, 1))
-
-            if dtype in ("rect", "filled_rect"):
-                rw, rh = random.randint(15, 60), random.randint(15, 60)
-                ry     = random.randint(0, max(1, h - rh))
-                rx     = random.randint(0, max(1, w - rw))
-                s_mask[ry:ry+rh, rx:rx+rw, :] = 1.0
-
-            elif dtype == "circle":
-                radius = random.randint(8, 35)
-                ry, rx = random.randint(0, h), random.randint(0, w)
-                yy, xx = np.ogrid[:h, :w]
-                s_mask = ((yy - ry)**2 + (xx - rx)**2 <= radius**2).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
-
-            elif dtype == "line":
-                angle  = random.uniform(0, np.pi)
-                thick  = random.randint(3, 10)
-                cos_a, sin_a = np.cos(angle), np.sin(angle)
-                yy, xx = np.ogrid[:h, :w]
-                proj   = xx * cos_a + yy * sin_a
-                offset = random.randint(0, h + w)
-                s_mask = (np.abs(proj - offset) < thick).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
-
-            elif dtype == "stripe_thin":
-                angle  = random.uniform(0, np.pi)
-                thick  = random.randint(1, 4)
-                gap    = random.randint(8, 25)
-                cos_a, sin_a = np.cos(angle), np.sin(angle)
-                yy, xx = np.ogrid[:h, :w]
-                proj   = xx * cos_a + yy * sin_a
-                offset = random.randint(0, h + w)
-                s_mask = (
-                    (np.abs(proj - offset) < thick) |
-                    (np.abs(proj - offset - gap) < thick)
-                ).astype(float)
-                s_mask = np.expand_dims(s_mask, -1)
-
-            piece  = s_mask * hand_mask * a
-            img_np = img_np * (1 - piece) + (color * piece)
-
-        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
@@ -390,12 +182,12 @@ def _print_augmentation_stats(train_ds, val_ds):
     p_vflip   = 0.50
     p_rotate  = 0.60
     p_crop    = 0.50
-    p_bg      = 0.50
-    p_hand    = 0.50
-    p_texture = 0.50
+    p_bg      = 0.00 # Removed
+    p_hand    = 0.00 # Removed
+    p_texture = 0.00 # Removed
     p_noise   = 0.25
 
-    p_none = (1-p_hflip)*(1-p_vflip)*(1-p_rotate)*(1-p_crop)*(1-p_bg)*(1-p_hand)*(1-p_texture)*(1-p_noise)
+    p_none = (1-p_hflip)*(1-p_vflip)*(1-p_rotate)*(1-p_crop)*(1-p_noise)
     p_any  = 1.0 - p_none
 
     print(f"\n{'─'*60}")
