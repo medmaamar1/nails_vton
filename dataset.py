@@ -208,13 +208,13 @@ class NailDataset(Dataset):
                 grad = np.linspace(0, 1, h).reshape(h, 1, 1)
                 img_np = img_np * (1 - mask_3d * a * grad) + (color * mask_3d * a * grad)
 
-        # ── Step 2: High-Density Art Overlays (Glitter, Dots, Rects, Stripes) ──
-        if random.random() > 0.2:
-            num_designs = random.randint(5, 15) # High density
+        # ── Step 2: Subtle Art Overlays (Glitter, Dots, Rects, Stripes) ──
+        if random.random() > 0.4:
+            num_designs = random.randint(2, 5) # Toned down from 15
             for _ in range(num_designs):
                 dtype = random.choice(["rect", "star", "stripe", "circle"])
                 color = np.random.randint(0, 256, (3,))
-                a     = random.uniform(0.6, 0.95)
+                a     = random.uniform(0.3, 0.6) # Toned down from 0.95
                 
                 s_mask = np.zeros((h, w, 1))
                 
@@ -253,10 +253,10 @@ class NailDataset(Dataset):
         return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
     def _pick_alpha(self):
-        """70% chance fully opaque (1.0), 30% chance semi-transparent."""
-        if random.random() < 0.70:
+        """Mostly semi-transparent to keep anatomy visible."""
+        if random.random() < 0.20: # Reduced from 70%
             return 1.0
-        return random.uniform(0.3, 0.9)
+        return random.uniform(0.2, 0.6) # Toned down from 0.9
 
     def _vandalize_background(self, img, msk):
         """Paint random shapes, lines, and noise onto the background."""
@@ -270,8 +270,8 @@ class NailDataset(Dataset):
         noise = np.random.normal(0, noise_strength, img_np.shape)
         img_np = img_np + noise * (1.0 - np.expand_dims(msk_np, -1))
 
-        # Heavily increased number of patches/shapes to destroy background
-        num_patches = random.randint(30, 60)
+        # Toned down number of patches
+        num_patches = random.randint(8, 18)
         for _ in range(num_patches):
             color  = np.random.randint(0, 256, (3,))
             a      = self._pick_alpha()
@@ -325,8 +325,8 @@ class NailDataset(Dataset):
         noise = np.random.normal(0, noise_strength, img_np.shape)
         img_np = img_np + noise * hand_mask
 
-        # Heavily increased number of patches/shapes to destroy hand texture
-        num_patches = random.randint(20, 40)
+        # Toned down number of patches
+        num_patches = random.randint(6, 12)
         for _ in range(num_patches):
             color  = np.random.randint(0, 256, (3,))
             a      = self._pick_alpha()
