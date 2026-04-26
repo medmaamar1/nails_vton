@@ -159,6 +159,10 @@ class NailDataset(Dataset):
             kernel = random.choice([3, 5])
             img = TF.gaussian_blur(img, kernel_size=(kernel, kernel))
 
+        # Texture-Invariance: Random Manicure (Base Coat only)
+        if random.random() > 0.5:
+            img = self._vandalize_texture(img, msk)
+
         # Global Gaussian noise: simulate camera noise and low-quality images
         if random.random() > 0.75:
             img_np = np.array(img).astype(np.float32)
@@ -166,6 +170,28 @@ class NailDataset(Dataset):
             img    = Image.fromarray(np.clip(img_np + noise, 0, 255).astype(np.uint8))
 
         return img, msk
+
+    def _vandalize_texture(self, img, msk):
+        """
+        Manicure Engine — Base Coat only.
+        Applies random solid or gradient colors to the nail.
+        """
+        img_np = np.array(img).astype(np.float32)
+        msk_np = np.array(msk).astype(np.float32) / 255.0  # (H, W)
+        h, w, _ = img_np.shape
+        mask_3d = np.expand_dims(msk_np, axis=-1)
+        
+        # ── Base Coat (80% chance if texture vandalize is active) ───────────
+        color = np.random.randint(0, 256, (3,))
+        a = random.uniform(0.2, 0.5) # Subtle (was up to 0.9)
+        
+        if random.random() > 0.4: # Solid
+            img_np = img_np * (1 - mask_3d * a) + (color * mask_3d * a)
+        else: # Gradient
+            grad = np.linspace(0, 1, h).reshape(h, 1, 1)
+            img_np = img_np * (1 - mask_3d * a * grad) + (color * mask_3d * a * grad)
+
+        return Image.fromarray(np.clip(img_np, 0, 255).astype(np.uint8))
 
 
 # ── DataLoader factory ─────────────────────────────────────────────────────────
